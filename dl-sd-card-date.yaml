@@ -1,0 +1,56 @@
+
+# dl-sd-card-date.yaml — Konfiguration (Pfade relativ zum Scriptordner)
+
+INPUT_DIR: "Input"
+OUTPUT_DIR: "Output"
+
+SD_GLOB: "SGS_SDCard_raw_*.csv"
+INFLUX_GLOB: "Sensors_Raw_*.csv"
+
+# Quantisierung
+TEMP_DECIMALS: 10
+RH_DECIMALS: 8
+BAT_DECIMALS: 3
+ROUNDING: "ROUND_HALF_UP"
+
+# Jitter
+J_MAX_SECONDS: 8.0
+
+# Matching
+MAX_SD_CANDIDATES: 50
+B_INIT_MIN: 0.5
+B_INIT_MAX: 1.5
+DT_DUP_EPS: 1.0
+
+# Fit
+N_TRIM_ITER: 3
+MAX_TRIM_FRACTION: 0.02
+MIN_ANCHORS_FOR_FIT: 3
+
+# Fensterung
+WINDOW_DAYS: 21.0
+WINDOW_OVERLAP_HOURS: 48.0
+MIN_ANCHORS_PER_WINDOW: 30
+
+# 6h Fit-Anker-Selektion
+FIT_ANCHOR_GRID_HOURS: 6.0
+EDGE_ANCHOR_WINDOW_MIN: 60.0
+ANCHOR_PICK: "median"   # "median" | "first" | "last"
+
+# Fallback
+WINDOW_FALLBACK_SEGMENT_FIT: true
+MIN_ANCHORS_FOR_SEGMENT_FALLBACK: 30
+MIN_FALLBACK_COVERAGE_FRAC: 0.5
+
+# Qualität
+MIN_ANCHORS_GOOD: 20
+
+# Stitching
+STITCH_WITHIN_ONLY: true
+STITCH_PAD_S: 3600.0
+
+# Output-Dateinamen (unter OUTPUT_DIR)
+OUT_SD_ABSOLUTE: "SD_absolute.csv"
+OUT_SEGMENT_REPORT: "Segment_report.csv"
+OUT_ANCHOR_REPORT: "Anchors_report.csv"
+OUT_PLAUSIBILITY_REPORT: "Plausibility_report.csv"
