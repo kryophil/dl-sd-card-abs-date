@@ -46,8 +46,8 @@ MIN_FALLBACK_COVERAGE_FRAC: 0.5
 MIN_ANCHORS_GOOD: 20
 
 # Stitching
-STITCH_WITHIN_ONLY: true
-STITCH_PAD_S: 3600.0
+STITCH_WITHIN_ONLY: false
+STITCH_PAD_S: 1000000000000   # sehr groß, damit jeder Punkt einem Fit "am nächsten" zugeordnet wird
 
 # Output-Dateinamen (unter OUTPUT_DIR)
 OUT_SD_ABSOLUTE: "SD_absolute.csv"

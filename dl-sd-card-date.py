@@ -77,9 +77,21 @@ MIN_FALLBACK_COVERAGE_FRAC = 0.5
 # Qualitäts‑Schwellen
 MIN_ANCHORS_GOOD = 20
 
+# Segment-Fallback über gesamte Segmentbreite ausdehnen?
+FALLBACK_EXTEND_TO_SEGMENT_BOUNDS = True
+# Wenn mind. ein Fit existiert, dehne erste/letzte Fit-x-Grenzen auf Segment-Grenzen aus
+EXTEND_FITS_TO_SEGMENT_BOUNDS = True
+
 # Stitching
-STITCH_WITHIN_ONLY = True
-STITCH_PAD_S = 3600.0
+STITCH_WITHIN_ONLY = False 
+STITCH_PAD_S = 1000000000000   # sehr groß, damit jeder Punkt einem Fit "am nächsten" zugeordnet wird
+
+
+# --- Robustness knobs (added) ---
+# If a 6h-fit window has too few fit-anchors, try ALL anchors in that window:
+MIN_ANCHORS_PER_WINDOW_ALL = 10   # fallback threshold using all anchors in the window
+# If a segment has too few fit-anchors overall, allow segment-wide fit using ALL anchors:
+MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL = 15
 
 # Output-Dateien (unter OUTPUT_DIR)
 OUT_SD_ABSOLUTE = "SD_absolute.csv"
@@ -104,41 +116,104 @@ def _apply_cli_overrides():
         globals()["OUTPUT_DIR"] = args.output_dir
     return args
 
+
+def _simple_yaml_scalar(s: str):
+    s = s.strip()
+    if s == "" or s.lower() == "null": return None
+    if s.lower() in ("true","false"): return s.lower()=="true"
+    # strip quotes if present
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        return s[1:-1]
+    # try int / float
+    try:
+        if "." in s or "e" in s.lower():
+            return float(s)
+        return int(s)
+    except Exception:
+        return s
+
+def _simple_yaml_load(text: str):
+    # very simple, flat key:value parser (for this project's config)
+    data = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"): 
+            continue
+        # support inline comments: key: value  # comment
+        if "#" in line:
+            # keep '#' inside quotes
+            in_s = False; in_d = False; idx = None
+            for i,ch in enumerate(line):
+                if ch == "'" and not in_d: in_s = not in_s
+                elif ch == '"' and not in_s: in_d = not in_d
+                elif ch == "#" and not in_s and not in_d:
+                    idx = i; break
+            if idx is not None:
+                line = line[:idx].rstrip()
+        if ":" not in line: 
+            continue
+        k, v = line.split(":", 1)
+        key = k.strip()
+        val = _simple_yaml_scalar(v)
+        data[key] = val
+    return data
+
 def _apply_config_overrides(config_path: Optional[str]):
+    # Determine config path
     if not config_path:
-        # Versuche YAML neben dem Script zu finden
         script_dir = Path(os.path.abspath(os.path.dirname(__file__)))
         default_yaml = script_dir / "dl-sd-card-date.yaml"
         if default_yaml.exists():
             config_path = str(default_yaml)
         else:
             return
-
     p = Path(config_path)
     if not p.exists():
         print(f"[WARN] Config file not found: {config_path} — using built-in defaults.", file=sys.stderr)
         return
+    text = p.read_text(encoding="utf-8")
+
+    # Try YAML if extension is .yaml/.yml and PyYAML available; otherwise use simple parser.
+    ext = p.suffix.lower()
     data = None
-    try:
-        import yaml  # type: ignore
-        with open(p, "r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
-    except Exception:
+    if ext in (".yaml",".yml"):
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(text)
+        except Exception as e:
+            print(f"[INFO] PyYAML not available or failed ({e}); using simple YAML parser.", file=sys.stderr)
+            data = _simple_yaml_load(text)
+    elif ext == ".json":
         import json
-        with open(p, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        data = json.loads(text)
+    else:
+        # Try YAML first, then JSON
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(text)
+        except Exception:
+            try:
+                import json
+                data = json.loads(text)
+            except Exception:
+                print("[WARN] Could not parse config (neither YAML nor JSON). Using defaults.", file=sys.stderr)
+                return
+
     if not isinstance(data, dict):
-        print("[WARN] Config root must be a mapping/object. Ignoring.", file=sys.stderr); return
+        print("[WARN] Config root must be a mapping/object. Ignoring.", file=sys.stderr); 
+        return
 
     def ov(name, cast=None):
         if name in data:
             val = data[name]
-            if cast is not None:
+            if cast is not None and val is not None:
                 try: val = cast(val)
-                except Exception: print(f"[WARN] could not cast {name}", file=sys.stderr); return
+                except Exception: 
+                    print(f"[WARN] could not cast {name} -> {val}", file=sys.stderr); 
+                    return
             globals()[name] = val
 
-    def _as_str(x): return str(x)
+    def _as_str(x): return str(x) if x is not None else None
     ov("INPUT_DIR", _as_str); ov("OUTPUT_DIR", _as_str)
     ov("SD_GLOB", _as_str); ov("INFLUX_GLOB", _as_str)
     ov("TIMEZONE", _as_str); ov("NOMINAL_INTERVAL_S", int)
@@ -153,11 +228,9 @@ def _apply_config_overrides(config_path: Optional[str]):
     ov("MIN_ANCHORS_GOOD", int)
     ov("STITCH_WITHIN_ONLY", bool); ov("STITCH_PAD_S", float)
     ov("OUT_SD_ABSOLUTE", _as_str); ov("OUT_SEGMENT_REPORT", _as_str); ov("OUT_ANCHOR_REPORT", _as_str); ov("OUT_PLAUSIBILITY_REPORT", _as_str)
-
-# apply
-_args = _apply_cli_overrides()
-_apply_config_overrides(_args.config)
-getcontext().prec = 40
+    ov("FALLBACK_EXTEND_TO_SEGMENT_BOUNDS", bool);
+    ov("MIN_ANCHORS_PER_WINDOW_ALL", int); ov("MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL", int);
+    ov("EXTEND_FITS_TO_SEGMENT_BOUNDS", bool)
 
 # ====================
 # Datenklassen
@@ -330,46 +403,31 @@ def prepare_sd_arrays(sd_points: List[SDPoint]):
         triples[p.global_idx] = p.triple_q
     return seg_ids, idx_in_seg, t_rel, triples
 
+
 def robust_anchor_match(sd_points: List[SDPoint],
                         influx_points: List[InfluxPoint],
                         J: float) -> List[Anchor]:
+    """
+    Lenient, order-preserving greedy matching:
+    - exact triple equality (after quantization) is required
+    - picks the next SD occurrence after the previous SD position
+    - no b/jitter gating; outliers handled later by fit_with_trim
+    """
     sd_index = build_sd_index(sd_points)
     sd_seg_ids, sd_idx_in_seg, sd_t_rel, sd_triples = prepare_sd_arrays(sd_points)
     anchors: List[Anchor] = []
     current_sd_pos = -1
-    have_prev = False
-    prev_t_rel = None; prev_T = None; prev_seg = None
-    b_lo = B_INIT_MIN; b_hi = B_INIT_MAX
 
     for infl in influx_points:
         key = triple_key(infl.triple_q)
         positions = sd_index.get(key, [])
-        if not positions: continue
+        if not positions:
+            continue
         j0 = bisect_right(positions, current_sd_pos)
-        cand = positions[j0:j0+MAX_SD_CANDIDATES]
-        if not cand: continue
-
-        chosen = None
-        for sd_pos in cand:
-            x = float(sd_t_rel[sd_pos]); seg = int(sd_seg_ids[sd_pos])
-            if (not have_prev) or (seg != prev_seg) or (x <= prev_t_rel):
-                chosen = sd_pos; b_lo = B_INIT_MIN; b_hi = B_INIT_MAX; break
-
-            dx = x - prev_t_rel
-            if dx <= 0: continue
-            dT = infl.ts_utc.timestamp() - prev_T
-            if dT <= max(2.0*J, DT_DUP_EPS):
-                chosen = sd_pos
-                break
-
-            lo = (dT - 2.0*J) / dx
-            hi = (dT) / dx
-            new_lo = max(b_lo, lo); new_hi = min(b_hi, hi)
-            if new_lo <= new_hi:
-                chosen = sd_pos; b_lo, b_hi = new_lo, new_hi; break
-
-        if chosen is None: continue
-
+        if j0 >= len(positions):
+            # no SD occurrence after current position
+            continue
+        chosen = positions[j0]
         anchors.append(Anchor(
             sd_global_idx=chosen,
             sd_segment_id=int(sd_seg_ids[chosen]),
@@ -380,9 +438,6 @@ def robust_anchor_match(sd_points: List[SDPoint],
             triple_q=infl.triple_q
         ))
         current_sd_pos = chosen
-        prev_t_rel = float(sd_t_rel[chosen]); prev_T = infl.ts_utc.timestamp()
-        prev_seg = int(sd_seg_ids[chosen]); have_prev = True
-
     return anchors
 
 # ====================
@@ -503,6 +558,23 @@ def fit_with_trim(anchors: List[Anchor], J: float, min_anchors: int):
 # ====================
 # Fensterung & Stitching
 # ====================
+def _extend_fits_to_segment_bounds(fits: List[WindowFit], seg_bounds: SegmentBounds) -> List[WindowFit]:
+    if not fits: 
+        return fits
+    # Kopie erzeugen (immutables vermeiden)
+    out = list(fits)
+    # Sortiert nach x_center (sollte schon segmentweit sein)
+    out.sort(key=lambda f: f.x_center)
+    # Ersten und letzten Fit auf Segmentgrenzen ausdehnen
+    first = out[0]; last = out[-1]
+    changed = False
+    if EXTEND_FITS_TO_SEGMENT_BOUNDS:
+        if first.x_min > seg_bounds.x_min:
+            first.x_min = float(seg_bounds.x_min); changed = True
+        if last.x_max < seg_bounds.x_max:
+            last.x_max = float(seg_bounds.x_max); changed = True
+    return out
+
 
 @dataclass
 class SegmentBounds:
@@ -525,33 +597,67 @@ def build_time_windows(anchors_sorted: List[Anchor], window_days: float, overlap
         t0 = t0 + step
     return windows
 
+
 def fit_windows_for_segment(seg_id: int, anchors_sorted: List[Anchor], fit_anchors_sorted: List[Anchor], seg_bounds: SegmentBounds) -> List[WindowFit]:
     windows = build_time_windows(anchors_sorted, WINDOW_DAYS, WINDOW_OVERLAP_HOURS)
     fits: List[WindowFit] = []
     for (w0, w1) in windows:
-        sub = [a for a in fit_anchors_sorted if (a.influx_ts_utc >= w0 and a.influx_ts_utc <= w1)]
-        if len(sub) < MIN_ANCHORS_PER_WINDOW:
+        # primary: use selected FIT anchors within window
+        sub_fit = [a for a in fit_anchors_sorted if (a.influx_ts_utc >= w0 and a.influx_ts_utc <= w1)]
+        anchors_for_this_window = None
+        if len(sub_fit) >= MIN_ANCHORS_PER_WINDOW:
+            anchors_for_this_window = sub_fit
+        else:
+            # fallback: use ALL anchors in this window if enough
+            sub_all = [a for a in anchors_sorted if (a.influx_ts_utc >= w0 and a.influx_ts_utc <= w1)]
+            if len(sub_all) >= MIN_ANCHORS_PER_WINDOW_ALL:
+                anchors_for_this_window = sub_all
+
+        if anchors_for_this_window is None:
             continue
-        a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(sub, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
+
+        a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(anchors_for_this_window, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
         if q == "no_abs_time":
             continue
-        xs = [a_.sd_t_rel_s for a_ in sub]
+        xs = [a_.sd_t_rel_s for a_ in anchors_for_this_window]
         xm, xM = float(min(xs)), float(max(xs))
         xc = 0.5*(xm + xM)
-        fits.append(WindowFit(seg_id, w0, w1, xm, xM, xc, a, b, rmse, j_med, j_p95, len(sub), q, notes))
-    if not fits and WINDOW_FALLBACK_SEGMENT_FIT and len(fit_anchors_sorted) >= MIN_ANCHORS_FOR_SEGMENT_FALLBACK:
-        xs = [a_.sd_t_rel_s for a_ in fit_anchors_sorted]
-        if xs:
-            xm, xM = float(min(xs)), float(max(xs))
-            seg_span = (xM - xm)
-            coverage_frac = 1.0 if seg_span > 0 else 0.0
-            if coverage_frac >= MIN_FALLBACK_COVERAGE_FRAC:
-                a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(fit_anchors_sorted, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
-                if q != "no_abs_time":
-                    xc = 0.5*(xm+xM)
+        fits.append(WindowFit(seg_id, w0, w1, xm, xM, xc, a, b, rmse, j_med, j_p95, len(anchors_for_this_window), q, notes))
+
+    # segment-wide fallbacks if no windows
+    if not fits and WINDOW_FALLBACK_SEGMENT_FIT:
+        # (a) try with FIT anchors across entire segment
+        if len(fit_anchors_sorted) >= MIN_ANCHORS_FOR_SEGMENT_FALLBACK:
+            xs = [a_.sd_t_rel_s for a_ in fit_anchors_sorted]
+            if xs:
+                xm, xM = float(min(xs)), float(max(xs))
+                seg_span = (xM - xm)
+                coverage_frac = 1.0 if seg_span > 0 else 0.0
+                if coverage_frac >= MIN_FALLBACK_COVERAGE_FRAC:
+                    a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(fit_anchors_sorted, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
+                    if q != "no_abs_time":
+                        xc = 0.5*(xm+xM)
+                    if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
+                        xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
+                        xc = 0.5*(xm+xM)
                     fits.append(WindowFit(seg_id, fit_anchors_sorted[0].influx_ts_utc, fit_anchors_sorted[-1].influx_ts_utc,
                                           xm, xM, xc, a, b, rmse, j_med, j_p95, len(fit_anchors_sorted), q, notes))
+        # (b) if still no fits, try ALL anchors across segment
+        if not fits and len(anchors_sorted) >= MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL:
+            xs = [a_.sd_t_rel_s for a_ in anchors_sorted]
+            if xs:
+                xm, xM = float(min(xs)), float(max(xs))
+                if (xM - xm) > 0:
+                    a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(anchors_sorted, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
+                    if q != "no_abs_time":
+                        xc = 0.5*(xm+xM)
+                    if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
+                        xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
+                        xc = 0.5*(xm+xM)
+                    fits.append(WindowFit(seg_id, anchors_sorted[0].influx_ts_utc, anchors_sorted[-1].influx_ts_utc,
+                                          xm, xM, xc, a, b, rmse, j_med, j_p95, len(anchors_sorted), q, notes))
     return fits
+
 
 def choose_window_for_point(x: float, fits: List[WindowFit]) -> Optional[WindowFit]:
     if not fits: return None
@@ -704,12 +810,18 @@ def main():
     for seg_id, anchors in anchors_by_segment.items():
         fit_anchors_by_segment[seg_id] = select_fit_anchors_for_segment(anchors)
 
+    # Debug: per-segment anchor stats
+    for seg_id, anc in anchors_by_segment.items():
+        print(f"[INFO] Segment {seg_id}: anchors={len(anc)} fit_anchors={len(fit_anchors_by_segment.get(seg_id, []))}")
+
     fits_by_segment: Dict[int, List[WindowFit]] = {}
     for seg_id, anchors in anchors_by_segment.items():
         fit_anc = fit_anchors_by_segment.get(seg_id, [])
         bounds = seg_bounds[seg_id]
         sb = SegmentBounds(bounds[0], bounds[1])
         fits_by_segment[seg_id] = fit_windows_for_segment(seg_id, anchors, fit_anc, sb)
+        fits_by_segment[seg_id] = _extend_fits_to_segment_bounds(fits_by_segment[seg_id], sb)
+        print(f"[INFO] Segment {seg_id}: windows=" + str(len(fits_by_segment.get(seg_id, []))))
 
     df_abs, df_seg = make_outputs(sd_points, fits_by_segment, out_dir)
     df_anch = build_anchor_report(anchors_by_segment, fits_by_segment, out_dir)
