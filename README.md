@@ -110,8 +110,8 @@ Für die Entwicklung wurden folgende externen Unterlagen/Daten bereitgestellt un
 ├─ dl-sd-card-date.py       # Pipeline (Windows-tauglich)
 ├─ dl-sd-card-date.yaml     # Konfiguration (optional; YAML, flach)
 ├─ Input\                   # hier liegen alle CSV-Inputdateien
-│  ├─ *_SDCard_raw_*.csv
-│  └─ Sensors_Raw_*.csv
+│  ├─ *_SDCard_raw_*.csv    # Files von der SD-Card des Gerätes
+│  └─ Sensors_Raw_*.csv     # Downloads via Grafana von der Influx-Datenbank
 └─ Output\                  # hier landen alle Resultatdateien
    ├─ SD_absolute.csv
    ├─ Segment_report.csv
@@ -290,9 +290,3 @@ Alle Anker:
 - Pull Requests willkommen (Tests, Profiling, neue Reports).  
 - Lizenz: tbd
 
----
-
-## Kurzfazit
-
-- **Exakte Tripel-Anker** + **linearer Fit mit Jitter-Constraints** liefern reproduzierbare, robuste absolute Zeitstempel für SD-Rohdaten – ohne DTW.  
-- Über **Fenster, Fallbacks und Stitching** wird praktisch vollständige Abdeckung erreicht – selbst bei jitterig übertragenen / spärlich auf Influx-DB vorhandenen Messungen.
