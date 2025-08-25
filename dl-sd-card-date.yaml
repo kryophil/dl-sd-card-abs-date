@@ -4,7 +4,7 @@
 INPUT_DIR: "Input"
 OUTPUT_DIR: "Output"
 
-SD_GLOB: "SGS_SDCard_raw_*.csv"
+SD_GLOB: "*_SDCard_raw_*.csv"
 INFLUX_GLOB: "Sensors_Raw_*.csv"
 
 # Quantisierung

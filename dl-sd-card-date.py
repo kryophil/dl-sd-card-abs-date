@@ -33,7 +33,7 @@ import numpy as np
 INPUT_DIR  = "Input"
 OUTPUT_DIR = "Output"
 
-SD_GLOB      = "SGS_SDCard_raw_*.csv"     # Rohdaten SD-Card (ohne Header)
+SD_GLOB      = "*_SDCard_raw_*.csv"     # Rohdaten SD-Card (ohne Header)
 INFLUX_GLOB  = "Sensors_Raw_*.csv"        # Influx/Grafana Exporte (mit Header)
 
 TIMEZONE = "UTC"
