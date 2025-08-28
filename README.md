@@ -8,8 +8,8 @@ Absolute Datierung von SD-Karten-Rohdaten (Decentlab DL-SHT35) anhand von Influx
 
 Sensorwerte (Temperatur, rel. Feuchte, Batteriespannung) werden auf der **SD-Karte** im Rohformat mit **relativen Zeiten seit letztem Reset** gespeichert. Eine **Teilmenge** dieser Werte wird (mit zufälligem Übermittlungs-Jitter) via LoRa an eine **Influx-Datenbank** übertragen und dort mit **absoluten UTC-Zeitstempeln** abgelegt.
 
-Dieses Tool datiert **alle SD-Rohwerte** absolut, indem es:
-- **exakte Tripel-Übereinstimmungen** `(T, RH, U)` zwischen SD und Influx findet (nach definierter Quantisierung),
+Dieses Script datiert **alle SD-Rohwerte** absolut, indem es:
+- **exakte Tripel-Übereinstimmungen** `(T, RH, U)` zwischen SD und Influx findet (nach definierter Stückelung),
 - die SD-Zeitachse pro Segment (Reset-bis-Reset) per **linearem Fit** gegen die Influx-Zeitachse kalibriert,
 - dabei **Jitter** und **Uhrdrift** berücksichtigt,
 - und Lücken über **Fenster** (Windows) und **Fallbacks** robust schließt.
