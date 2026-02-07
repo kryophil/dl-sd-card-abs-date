@@ -7,47 +7,27 @@ OUTPUT_DIR: "Output"
 SD_GLOB: "*_SDCard_raw_*.csv"
 INFLUX_GLOB: "Sensors_Raw_*.csv"
 
-# Quantisierung
+# Quantisierung — Nachkommastellen für exaktes Tripel-Matching
 TEMP_DECIMALS: 10
 RH_DECIMALS: 8
 BAT_DECIMALS: 3
-ROUNDING: "ROUND_HALF_UP"
 
-# Jitter
+# Jitter (laut Datenblatt: 0…8 s zufällige Verzögerung vor LoRa-TX)
 J_MAX_SECONDS: 8.0
 
-# Matching
-MAX_SD_CANDIDATES: 50
-B_INIT_MIN: 0.5
-B_INIT_MAX: 1.5
-DT_DUP_EPS: 1.0
+# Interpolation: Bin-Breite für Median-Offset-Glättung (Stunden)
+BIN_HOURS: 6.0
+MIN_ANCHORS_PER_BIN: 3
 
-# Fit
+# Trimming: iteratives Entfernen von Ausreißern
 N_TRIM_ITER: 3
 MAX_TRIM_FRACTION: 0.02
-MIN_ANCHORS_FOR_FIT: 3
+MIN_ANCHORS_FOR_FIT: 30
 
-# Fensterung
-WINDOW_DAYS: 21.0
-WINDOW_OVERLAP_HOURS: 48.0
-MIN_ANCHORS_PER_WINDOW: 30
-
-# 6h Fit-Anker-Selektion
-FIT_ANCHOR_GRID_HOURS: 6.0
-EDGE_ANCHOR_WINDOW_MIN: 60.0
-ANCHOR_PICK: "median"   # "median" | "first" | "last"
-
-# Fallback
-WINDOW_FALLBACK_SEGMENT_FIT: true
-MIN_ANCHORS_FOR_SEGMENT_FALLBACK: 30
-MIN_FALLBACK_COVERAGE_FRAC: 0.5
-
-# Qualität
+# Qualitätsschwellen
+RMSE_GOOD_S: 12.0
+RMSE_MED_S: 20.0
 MIN_ANCHORS_GOOD: 20
-
-# Stitching
-STITCH_WITHIN_ONLY: false
-STITCH_PAD_S: 1000000000000   # sehr groß, damit jeder Punkt einem Fit "am nächsten" zugeordnet wird
 
 # Output-Dateinamen (unter OUTPUT_DIR)
 OUT_SD_ABSOLUTE: "SD_absolute.csv"

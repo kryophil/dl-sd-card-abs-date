@@ -3,25 +3,24 @@
 
 """
 dl-sd-card-date — Absolute Datierung der SD-Karten-Rohdaten gegen Influx-Export
--------------------------------------------------------------------------------
-- Windows-freundliche I/O: Input\ (alle CSV-Inputs), Output\ (alle Resultate)
-- 6h Fit-Anker-Selektion pro Segment (median/first/last) + Start/End-Pinning
-- Stitching nur innerhalb der Fenster (konfigurierbar)
-- Exakte Tripel-Matches mit Quantisierung (T=10, RH=8, U=3; ROUND_HALF_UP)
-- Ordungserhaltendes Matching; Duplikat-Timestamps verengen Korridor nicht
-- CLI-Overrides: --input-dir, --output-dir, --config
+--------------------------------------------------------------------------------
+Refactored v2:
+  - Vektorisierte I/O (kein iterrows)
+  - float64 Quantisierung (kein Decimal)
+  - Glatte Interpolation durch gebinnte Median-Offsets (kein Fenster-Stitching)
+  - Alle Anker werden genutzt (keine 6h-Ausdünnung)
+  - Vereinfachte Konfiguration (~10 Parameter statt 30+)
+  - Gleiches Ausgabeformat (SD_absolute.csv, Segment_report.csv, etc.)
 
 Konfig via YAML (optional): dl-sd-card-date.yaml im selben Ordner (oder via --config)
 """
 
 from __future__ import annotations
 import sys, os, math
-from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 from collections import defaultdict
 from bisect import bisect_right
-from decimal import Decimal, ROUND_HALF_UP, getcontext
 
 import pandas as pd
 import numpy as np
@@ -33,71 +32,37 @@ import numpy as np
 INPUT_DIR  = "Input"
 OUTPUT_DIR = "Output"
 
-SD_GLOB      = "*_SDCard_raw_*.csv"     # Rohdaten SD-Card (ohne Header)
-INFLUX_GLOB  = "Sensors_Raw_*.csv"        # Influx/Grafana Exporte (mit Header)
+SD_GLOB      = "*_SDCard_raw_*.csv"
+INFLUX_GLOB  = "Sensors_Raw_*.csv"
 
-TIMEZONE = "UTC"
-NOMINAL_INTERVAL_S = 120
-
-# Quantisierung physikalischer Werte
+# Quantisierung — Nachkommastellen für exaktes Tripel-Matching
 TEMP_DECIMALS = 10
-RH_DECIMALS = 8
-BAT_DECIMALS = 3
-ROUNDING = "ROUND_HALF_UP"
+RH_DECIMALS   = 8
+BAT_DECIMALS  = 3
 
-# Jitterfenster
+# Jitterfenster (laut Datenblatt: 0…8 s zufällige Verzögerung vor LoRa-TX)
 J_MAX_SECONDS = 8.0
 
-# Matching‑Robustheit
-MAX_SD_CANDIDATES = 50
-B_INIT_MIN = 0.5
-B_INIT_MAX = 1.5
-DT_DUP_EPS = 1.0
+# Interpolation: Bin-Breite für Median-Offset-Glättung
+BIN_HOURS = 6.0
+MIN_ANCHORS_PER_BIN = 3
 
-# Intervall‑Fit / Trimming
-N_TRIM_ITER = 3
-MAX_TRIM_FRACTION = 0.02
-MIN_ANCHORS_FOR_FIT = 3
+# Trimming: iteratives Entfernen von Ausreißern
+N_TRIM_ITER       = 3
+MAX_TRIM_FRACTION  = 0.02
+MIN_ANCHORS_FOR_FIT = 30
 
-# Fensterung (innerhalb eines Segments)
-WINDOW_DAYS = 21.0
-WINDOW_OVERLAP_HOURS = 48.0
-MIN_ANCHORS_PER_WINDOW = 30
-
-# 6h Fit‑Anker‑Selektion (pro Segment)
-FIT_ANCHOR_GRID_HOURS = 6.0
-EDGE_ANCHOR_WINDOW_MIN = 60.0
-ANCHOR_PICK = "median"   # "median" | "first" | "last"
-
-# Fallback‑Kontrollen
-WINDOW_FALLBACK_SEGMENT_FIT = True
-MIN_ANCHORS_FOR_SEGMENT_FALLBACK = 30
-MIN_FALLBACK_COVERAGE_FRAC = 0.5
-
-# Qualitäts‑Schwellen
+# Qualitätsschwellen
+RMSE_GOOD_S  = 12.0
+RMSE_MED_S   = 20.0
 MIN_ANCHORS_GOOD = 20
 
-# Segment-Fallback über gesamte Segmentbreite ausdehnen?
-FALLBACK_EXTEND_TO_SEGMENT_BOUNDS = True
-# Wenn mind. ein Fit existiert, dehne erste/letzte Fit-x-Grenzen auf Segment-Grenzen aus
-EXTEND_FITS_TO_SEGMENT_BOUNDS = True
-
-# Stitching
-STITCH_WITHIN_ONLY = False 
-STITCH_PAD_S = 1000000000000   # sehr groß, damit jeder Punkt einem Fit "am nächsten" zugeordnet wird
-
-
-# --- Robustness knobs (added) ---
-# If a 6h-fit window has too few fit-anchors, try ALL anchors in that window:
-MIN_ANCHORS_PER_WINDOW_ALL = 10   # fallback threshold using all anchors in the window
-# If a segment has too few fit-anchors overall, allow segment-wide fit using ALL anchors:
-MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL = 15
-
 # Output-Dateien (unter OUTPUT_DIR)
-OUT_SD_ABSOLUTE = "SD_absolute.csv"
-OUT_SEGMENT_REPORT = "Segment_report.csv"
-OUT_ANCHOR_REPORT = "Anchors_report.csv"
+OUT_SD_ABSOLUTE        = "SD_absolute.csv"
+OUT_SEGMENT_REPORT     = "Segment_report.csv"
+OUT_ANCHOR_REPORT      = "Anchors_report.csv"
 OUT_PLAUSIBILITY_REPORT = "Plausibility_report.csv"
+
 
 # ====================
 # CLI & YAML
@@ -109,7 +74,7 @@ def _apply_cli_overrides():
     parser.add_argument("--config", default=None)
     parser.add_argument("--input-dir", default=None)
     parser.add_argument("--output-dir", default=None)
-    args, _unknown = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
     if args.input_dir:
         globals()["INPUT_DIR"] = args.input_dir
     if args.output_dir:
@@ -117,49 +82,41 @@ def _apply_cli_overrides():
     return args
 
 
-def _simple_yaml_scalar(s: str):
-    s = s.strip()
-    if s == "" or s.lower() == "null": return None
-    if s.lower() in ("true","false"): return s.lower()=="true"
-    # strip quotes if present
-    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-        return s[1:-1]
-    # try int / float
-    try:
-        if "." in s or "e" in s.lower():
-            return float(s)
-        return int(s)
-    except Exception:
-        return s
-
-def _simple_yaml_load(text: str):
-    # very simple, flat key:value parser (for this project's config)
+def _simple_yaml_load(text: str) -> dict:
+    """Flacher Key:Value-Parser (kein PyYAML nötig)."""
     data = {}
     for line in text.splitlines():
         line = line.strip()
-        if not line or line.startswith("#"): 
+        if not line or line.startswith("#"):
             continue
-        # support inline comments: key: value  # comment
-        if "#" in line:
-            # keep '#' inside quotes
-            in_s = False; in_d = False; idx = None
-            for i,ch in enumerate(line):
-                if ch == "'" and not in_d: in_s = not in_s
-                elif ch == '"' and not in_s: in_d = not in_d
-                elif ch == "#" and not in_s and not in_d:
-                    idx = i; break
-            if idx is not None:
-                line = line[:idx].rstrip()
-        if ":" not in line: 
+        # Inline-Kommentare entfernen (nicht innerhalb Quotes)
+        in_q = False
+        for i, ch in enumerate(line):
+            if ch in ("'", '"'):
+                in_q = not in_q
+            elif ch == "#" and not in_q:
+                line = line[:i].rstrip()
+                break
+        if ":" not in line:
             continue
         k, v = line.split(":", 1)
-        key = k.strip()
-        val = _simple_yaml_scalar(v)
-        data[key] = val
+        v = v.strip()
+        # Typ-Erkennung
+        if v == "" or v.lower() == "null":
+            data[k.strip()] = None
+        elif v.lower() in ("true", "false"):
+            data[k.strip()] = v.lower() == "true"
+        elif (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            data[k.strip()] = v[1:-1]
+        else:
+            try:
+                data[k.strip()] = float(v) if ("." in v or "e" in v.lower()) else int(v)
+            except ValueError:
+                data[k.strip()] = v
     return data
 
+
 def _apply_config_overrides(config_path: Optional[str]):
-    # Determine config path
     if not config_path:
         script_dir = Path(os.path.abspath(os.path.dirname(__file__)))
         default_yaml = script_dir / "dl-sd-card-date.yaml"
@@ -169,621 +126,534 @@ def _apply_config_overrides(config_path: Optional[str]):
             return
     p = Path(config_path)
     if not p.exists():
-        print(f"[WARN] Config file not found: {config_path} — using built-in defaults.", file=sys.stderr)
+        print(f"[WARN] Config nicht gefunden: {config_path}", file=sys.stderr)
         return
     text = p.read_text(encoding="utf-8")
-
-    # Try YAML if extension is .yaml/.yml and PyYAML available; otherwise use simple parser.
-    ext = p.suffix.lower()
-    data = None
-    if ext in (".yaml",".yml"):
-        try:
-            import yaml  # type: ignore
-            data = yaml.safe_load(text)
-        except Exception as e:
-            print(f"[INFO] PyYAML not available or failed ({e}); using simple YAML parser.", file=sys.stderr)
-            data = _simple_yaml_load(text)
-    elif ext == ".json":
-        import json
-        data = json.loads(text)
-    else:
-        # Try YAML first, then JSON
-        try:
-            import yaml  # type: ignore
-            data = yaml.safe_load(text)
-        except Exception:
-            try:
-                import json
-                data = json.loads(text)
-            except Exception:
-                print("[WARN] Could not parse config (neither YAML nor JSON). Using defaults.", file=sys.stderr)
-                return
-
+    try:
+        import yaml
+        data = yaml.safe_load(text)
+    except Exception:
+        data = _simple_yaml_load(text)
     if not isinstance(data, dict):
-        print("[WARN] Config root must be a mapping/object. Ignoring.", file=sys.stderr); 
         return
 
-    def ov(name, cast=None):
-        if name in data:
-            val = data[name]
-            if cast is not None and val is not None:
-                try: val = cast(val)
-                except Exception: 
-                    print(f"[WARN] could not cast {name} -> {val}", file=sys.stderr); 
-                    return
-            globals()[name] = val
+    KNOWN = {
+        "INPUT_DIR": str, "OUTPUT_DIR": str, "SD_GLOB": str, "INFLUX_GLOB": str,
+        "TEMP_DECIMALS": int, "RH_DECIMALS": int, "BAT_DECIMALS": int,
+        "J_MAX_SECONDS": float, "BIN_HOURS": float, "MIN_ANCHORS_PER_BIN": int,
+        "N_TRIM_ITER": int, "MAX_TRIM_FRACTION": float, "MIN_ANCHORS_FOR_FIT": int,
+        "RMSE_GOOD_S": float, "RMSE_MED_S": float, "MIN_ANCHORS_GOOD": int,
+        "OUT_SD_ABSOLUTE": str, "OUT_SEGMENT_REPORT": str,
+        "OUT_ANCHOR_REPORT": str, "OUT_PLAUSIBILITY_REPORT": str,
+    }
+    for name, cast in KNOWN.items():
+        if name in data and data[name] is not None:
+            try:
+                globals()[name] = cast(data[name])
+            except Exception:
+                pass
 
-    def _as_str(x): return str(x) if x is not None else None
-    ov("INPUT_DIR", _as_str); ov("OUTPUT_DIR", _as_str)
-    ov("SD_GLOB", _as_str); ov("INFLUX_GLOB", _as_str)
-    ov("TIMEZONE", _as_str); ov("NOMINAL_INTERVAL_S", int)
-    ov("TEMP_DECIMALS", int); ov("RH_DECIMALS", int); ov("BAT_DECIMALS", int); ov("ROUNDING", _as_str)
-    ov("J_MAX_SECONDS", float)
-    ov("MAX_SD_CANDIDATES", int); ov("B_INIT_MIN", float); ov("B_INIT_MAX", float); ov("DT_DUP_EPS", float)
-    ov("N_TRIM_ITER", int); ov("MAX_TRIM_FRACTION", float); ov("MIN_ANCHORS_FOR_FIT", int)
-    ov("WINDOW_DAYS", float); ov("WINDOW_OVERLAP_HOURS", float); ov("MIN_ANCHORS_PER_WINDOW", int)
-    ov("FIT_ANCHOR_GRID_HOURS", float); ov("EDGE_ANCHOR_WINDOW_MIN", float); ov("ANCHOR_PICK", _as_str)
-    ov("WINDOW_FALLBACK_SEGMENT_FIT", bool)
-    ov("MIN_ANCHORS_FOR_SEGMENT_FALLBACK", int); ov("MIN_FALLBACK_COVERAGE_FRAC", float)
-    ov("MIN_ANCHORS_GOOD", int)
-    ov("STITCH_WITHIN_ONLY", bool); ov("STITCH_PAD_S", float)
-    ov("OUT_SD_ABSOLUTE", _as_str); ov("OUT_SEGMENT_REPORT", _as_str); ov("OUT_ANCHOR_REPORT", _as_str); ov("OUT_PLAUSIBILITY_REPORT", _as_str)
-    ov("FALLBACK_EXTEND_TO_SEGMENT_BOUNDS", bool);
-    ov("MIN_ANCHORS_PER_WINDOW_ALL", int); ov("MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL", int);
-    ov("EXTEND_FITS_TO_SEGMENT_BOUNDS", bool)
 
 # ====================
-# Datenklassen
+# Quantisierung (float64, kein Decimal)
 # ====================
 
-@dataclass(frozen=True)
-class SDTripleQ:
-    T_q: str
-    RH_q: str
-    U_q: str
+def _round_half_up(x: np.ndarray, decimals: int) -> np.ndarray:
+    """ROUND_HALF_UP: 0.5 wird aufgerundet (wie kaufmännisches Runden)."""
+    factor = 10.0 ** decimals
+    return np.floor(x * factor + 0.5) / factor
 
-@dataclass
-class SDPoint:
-    global_idx: int
-    segment_id: int
-    idx_in_segment: int
-    t1024: int
-    t_rel_s: float
-    triple_q: SDTripleQ
 
-@dataclass
-class InfluxPoint:
-    idx: int
-    ts_utc: pd.Timestamp
-    triple_q: SDTripleQ
+def _format_val(val: float, decimals: int) -> str:
+    return f"{val:.{decimals}f}"
 
-@dataclass
-class Anchor:
-    sd_global_idx: int
-    sd_segment_id: int
-    sd_idx_in_segment: int
-    sd_t_rel_s: float
-    influx_idx: int
-    influx_ts_utc: pd.Timestamp
-    triple_q: SDTripleQ
 
-@dataclass
-class WindowFit:
-    seg_id: int
-    start_ts: pd.Timestamp
-    end_ts: pd.Timestamp
-    x_min: float
-    x_max: float
-    x_center: float
-    a: float
-    b: float
-    rmse_mid: Optional[float]
-    jitter_med: Optional[float]
-    jitter_p95: Optional[float]
-    n_anchors: int
-    quality: str
-    notes: str
+def sd_raw_to_quantized(temp_raw: np.ndarray, rh_raw: np.ndarray, bat_raw: np.ndarray):
+    """Vektorisierte Umrechnung: SD-Rohwerte → quantisierte physikalische Werte."""
+    T = temp_raw * 175.0 / 65535.0 - 45.0
+    RH = rh_raw * 100.0 / 65535.0
+    U = bat_raw / 1000.0
+    T_q = _round_half_up(T, TEMP_DECIMALS)
+    RH_q = _round_half_up(RH, RH_DECIMALS)
+    U_q = _round_half_up(U, BAT_DECIMALS)
+    return T_q, RH_q, U_q
+
+
+def influx_phys_to_quantized(T_vals: np.ndarray, RH_vals: np.ndarray, U_vals: np.ndarray):
+    """Vektorisierte Quantisierung der Influx-Physikwerte."""
+    T_q = _round_half_up(T_vals, TEMP_DECIMALS)
+    RH_q = _round_half_up(RH_vals, RH_DECIMALS)
+    U_q = _round_half_up(U_vals, BAT_DECIMALS)
+    return T_q, RH_q, U_q
+
+
+def _make_keys(T_q: np.ndarray, RH_q: np.ndarray, U_q: np.ndarray) -> np.ndarray:
+    """Erzeugt String-Schlüssel für Tripel-Matching."""
+    keys = np.empty(len(T_q), dtype=object)
+    for i in range(len(T_q)):
+        keys[i] = f"{T_q[i]:.{TEMP_DECIMALS}f}|{RH_q[i]:.{RH_DECIMALS}f}|{U_q[i]:.{BAT_DECIMALS}f}"
+    return keys
+
 
 # ====================
-# Hilfsfunktionen
-# ====================
-
-def _qunit(dp: int) -> Decimal: return Decimal(1).scaleb(-dp)
-def _quantize_half_up(x: Decimal, dp: int) -> Decimal: return x.quantize(_qunit(dp), rounding=ROUND_HALF_UP)
-def _format_dec(x: Decimal) -> str: return format(x, 'f')
-
-def sd_raw_to_quantized(temp_raw: int, rh_raw: int, bat_raw: int,
-                        dT: int, dRH: int, dU: int) -> SDTripleQ:
-    T = (Decimal(temp_raw) * Decimal(175) / Decimal(65535)) - Decimal(45)
-    RH = (Decimal(rh_raw) * Decimal(100) / Decimal(65535))
-    U = (Decimal(bat_raw) / Decimal(1000))
-    Tq = _quantize_half_up(T, dT); RHq = _quantize_half_up(RH, dRH); Uq = _quantize_half_up(U, dU)
-    return SDTripleQ(_format_dec(Tq), _format_dec(RHq), _format_dec(Uq))
-
-def influx_phys_to_quantized(T_val: str, RH_val: str, U_val: str,
-                             dT: int, dRH: int, dU: int) -> SDTripleQ:
-    T = _quantize_half_up(Decimal(T_val), dT)
-    RH = _quantize_half_up(Decimal(RH_val), dRH)
-    U = _quantize_half_up(Decimal(U_val), dU)
-    return SDTripleQ(_format_dec(T), _format_dec(RH), _format_dec(U))
-
-def triple_key(q: SDTripleQ) -> str: return f"{q.T_q}|{q.RH_q}|{q.U_q}"
-
-# ====================
-# IO
+# I/O (vektorisiert)
 # ====================
 
 def resolve_paths() -> Tuple[List[Path], List[Path], Path]:
-    """Find Input files under INPUT_DIR and ensure OUTPUT_DIR exists."""
     script_dir = Path(os.path.abspath(os.path.dirname(__file__)))
     in_dir = Path(INPUT_DIR)
     out_dir = Path(OUTPUT_DIR)
-    # Falls relative Pfade: relativ zum Scriptordner interpretieren
     if not in_dir.is_absolute():
         in_dir = (script_dir / in_dir).resolve()
     if not out_dir.is_absolute():
         out_dir = (script_dir / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-
     print(f"[INFO] INPUT_DIR:  {in_dir}")
     print(f"[INFO] OUTPUT_DIR: {out_dir}")
-
+    # Glob case-insensitiv: probiere auch Großschreibung der Endung
     sd_files = sorted(in_dir.glob(SD_GLOB))
-    influx_files = sorted(in_dir.glob(INFLUX_GLOB))
     if not sd_files:
-        print(f"[WARN] Keine SD-Dateien mit Muster {SD_GLOB} in {in_dir}", file=sys.stderr)
+        sd_files = sorted(in_dir.glob(SD_GLOB.replace('.csv', '.CSV')))
+    influx_files = sorted(in_dir.glob(INFLUX_GLOB))
     if not influx_files:
-        print(f"[WARN] Keine Influx-Dateien mit Muster {INFLUX_GLOB} in {in_dir}", file=sys.stderr)
+        influx_files = sorted(in_dir.glob(INFLUX_GLOB.replace('.csv', '.CSV')))
+    if not sd_files:
+        print(f"[WARN] Keine SD-Dateien: {SD_GLOB} in {in_dir}", file=sys.stderr)
+    if not influx_files:
+        print(f"[WARN] Keine Influx-Dateien: {INFLUX_GLOB} in {in_dir}", file=sys.stderr)
     return sd_files, influx_files, out_dir
 
-def read_sd_files(sd_paths: List[Path]) -> List[SDPoint]:
-    sd_points: List[SDPoint] = []
-    segment_id = 0; global_idx = 0; last_t_rel = None
+
+def read_sd_files(sd_paths: List[Path]) -> pd.DataFrame:
+    """Liest SD-CSVs und erkennt Segmentgrenzen (negative Zeitsprünge).
+
+    Returns DataFrame mit Spalten:
+        global_idx, segment_id, idx_in_segment, t1024, t_rel_s, T_q, RH_q, U_q, key
+    """
+    frames = []
     for path in sd_paths:
-        df = pd.read_csv(path, header=None, names=["t1024","temp_raw","rh_raw","bat_raw"], encoding="utf-8-sig").dropna()
-        df = df.astype({"t1024":"int64","temp_raw":"int64","rh_raw":"int64","bat_raw":"int64"})
-        df["t_rel_s"] = df["t1024"] / 1024.0
-        idx_in_segment = 0
-        for _, row in df.iterrows():
-            t_rel = float(row["t_rel_s"])
-            if last_t_rel is not None and (t_rel - last_t_rel) < 0:
-                segment_id += 1; idx_in_segment = 0
-            tq = sd_raw_to_quantized(int(row["temp_raw"]), int(row["rh_raw"]), int(row["bat_raw"]),
-                                     TEMP_DECIMALS, RH_DECIMALS, BAT_DECIMALS)
-            sd_points.append(SDPoint(global_idx, segment_id, idx_in_segment,
-                                     int(row["t1024"]), t_rel, tq))
-            last_t_rel = t_rel; global_idx += 1; idx_in_segment += 1
-    return sd_points
+        df = pd.read_csv(path, header=None,
+                         names=["t1024", "temp_raw", "rh_raw", "bat_raw"],
+                         encoding="utf-8-sig").dropna()
+        df = df.astype({"t1024": "int64", "temp_raw": "int64",
+                        "rh_raw": "int64", "bat_raw": "int64"})
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    df["t_rel_s"] = df["t1024"] / 1024.0
 
-def detect_influx_columns(df: pd.DataFrame) -> Tuple[str, str, str, str, str]:
+    # Segmente: wo die relative Zeit rückwärts springt
+    dt = df["t_rel_s"].diff()
+    segment_starts = (dt < 0).cumsum()
+    df["segment_id"] = segment_starts
+    df["idx_in_segment"] = df.groupby("segment_id").cumcount()
+    df["global_idx"] = np.arange(len(df))
+
+    # Vektorisierte Quantisierung
+    T_q, RH_q, U_q = sd_raw_to_quantized(
+        df["temp_raw"].values, df["rh_raw"].values, df["bat_raw"].values
+    )
+    df["T_q"] = T_q
+    df["RH_q"] = RH_q
+    df["U_q"] = U_q
+    df["key"] = _make_keys(T_q, RH_q, U_q)
+
+    return df
+
+
+def _detect_influx_columns(df: pd.DataFrame) -> Tuple[str, str, str]:
+    """Erkennt Temperatur-, Feuchte- und Batterie-Spalten automatisch."""
     cols = list(df.columns)
-    ts_col = cols[0]; tz_col = cols[1] if len(cols) > 1 else None
     bat_col = next((c for c in cols if "battery" in c.lower()), None)
-    rh_col  = next((c for c in cols if "humid" in c.lower()), None)
-    t_col   = next((c for c in cols if "temp" in c.lower()), None)
+    rh_col = next((c for c in cols if "humid" in c.lower()), None)
+    t_col = next((c for c in cols if "temp" in c.lower()), None)
     if not (bat_col and rh_col and t_col):
-        raise ValueError(f"Influx CSV: konnte Spalten nicht erkennen. Spalten: {cols}")
-    return ts_col, tz_col, bat_col, rh_col, t_col
+        raise ValueError(f"Influx-Spalten nicht erkannt: {cols}")
+    return t_col, rh_col, bat_col
 
-def read_influx_files(influx_paths: List[Path]) -> List[InfluxPoint]:
+
+def read_influx_files(influx_paths: List[Path]) -> pd.DataFrame:
+    """Liest Influx-CSVs (vektorisiert).
+
+    Returns DataFrame mit Spalten:
+        influx_idx, ts_utc, ts_epoch, T_q, RH_q, U_q, key
+    """
     frames = [pd.read_csv(p, encoding="utf-8-sig") for p in influx_paths]
     if not frames:
-        return []
+        return pd.DataFrame()
     df = pd.concat(frames, ignore_index=True)
-    ts_col, tz_col, bat_col, rh_col, t_col = detect_influx_columns(df)
+    t_col, rh_col, bat_col = _detect_influx_columns(df)
+    ts_col = df.columns[0]
+
     df[ts_col] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
     df = df.dropna(subset=[ts_col]).sort_values(by=ts_col).reset_index(drop=True)
-    df[bat_col] = df[bat_col].astype(str); df[rh_col] = df[rh_col].astype(str); df[t_col] = df[t_col].astype(str)
-    pts: List[InfluxPoint] = []
-    for i, row in df.iterrows():
-        pts.append(InfluxPoint(i, row[ts_col],
-                               influx_phys_to_quantized(row[t_col], row[rh_col], row[bat_col],
-                                                        TEMP_DECIMALS, RH_DECIMALS, BAT_DECIMALS)))
-    return pts
+
+    # Vektorisierte Quantisierung
+    T_q, RH_q, U_q = influx_phys_to_quantized(
+        df[t_col].astype(float).values,
+        df[rh_col].astype(float).values,
+        df[bat_col].astype(float).values,
+    )
+    # Epoch in Sekunden — pandas 3.0 nutzt datetime64[us], daher /1e6
+    ts_values = df[ts_col].values
+    ts_int = ts_values.astype("int64")
+    resolution = np.datetime_data(ts_values.dtype)[0]
+    divisor = {"ns": 1e9, "us": 1e6, "ms": 1e3, "s": 1.0}.get(resolution, 1e6)
+
+    result = pd.DataFrame({
+        "influx_idx": np.arange(len(df)),
+        "ts_utc": ts_values,
+        "ts_epoch": ts_int / divisor,
+        "T_q": T_q,
+        "RH_q": RH_q,
+        "U_q": U_q,
+    })
+    result["key"] = _make_keys(T_q, RH_q, U_q)
+    return result
+
 
 # ====================
 # Matching (greedy, ordnungserhaltend)
 # ====================
 
-def build_sd_index(sd_points: List[SDPoint]) -> Dict[str, List[int]]:
-    idx = defaultdict(list)
-    for p in sd_points: idx[triple_key(p.triple_q)].append(p.global_idx)
-    return idx
+def greedy_anchor_match(sd_df: pd.DataFrame, influx_df: pd.DataFrame) -> pd.DataFrame:
+    """Ordnungserhaltendes Greedy-Matching über exakte Tripel-Gleichheit.
 
-def prepare_sd_arrays(sd_points: List[SDPoint]):
-    max_idx = max(p.global_idx for p in sd_points) if sd_points else -1
-    seg_ids = np.empty(max_idx+1, dtype=np.int64)
-    idx_in_seg = np.empty(max_idx+1, dtype=np.int64)
-    t_rel = np.empty(max_idx+1, dtype=np.float64)
-    triples = [None]*(max_idx+1)
-    for p in sd_points:
-        seg_ids[p.global_idx] = p.segment_id
-        idx_in_seg[p.global_idx] = p.idx_in_segment
-        t_rel[p.global_idx] = p.t_rel_s
-        triples[p.global_idx] = p.triple_q
-    return seg_ids, idx_in_seg, t_rel, triples
-
-
-def robust_anchor_match(sd_points: List[SDPoint],
-                        influx_points: List[InfluxPoint],
-                        J: float) -> List[Anchor]:
+    Returns DataFrame mit Spalten:
+        sd_global_idx, segment_id, idx_in_segment, t_rel_s,
+        influx_idx, ts_utc, ts_epoch, T_q, RH_q, U_q
     """
-    Lenient, order-preserving greedy matching:
-    - exact triple equality (after quantization) is required
-    - picks the next SD occurrence after the previous SD position
-    - no b/jitter gating; outliers handled later by fit_with_trim
-    """
-    sd_index = build_sd_index(sd_points)
-    sd_seg_ids, sd_idx_in_seg, sd_t_rel, sd_triples = prepare_sd_arrays(sd_points)
-    anchors: List[Anchor] = []
-    current_sd_pos = -1
+    cols = ["sd_global_idx", "segment_id", "idx_in_segment", "t_rel_s",
+            "influx_idx", "ts_utc", "ts_epoch", "T_q", "RH_q", "U_q"]
+    if len(sd_df) == 0 or len(influx_df) == 0:
+        return pd.DataFrame(columns=cols)
 
-    for infl in influx_points:
-        key = triple_key(infl.triple_q)
-        positions = sd_index.get(key, [])
-        if not positions:
+    # Index: key → sortierte Liste von global_idx
+    sd_index: Dict[str, List[int]] = defaultdict(list)
+    sd_keys = sd_df["key"].values
+    for i, key in enumerate(sd_keys):
+        sd_index[key].append(i)
+
+    sd_global_idx = sd_df["global_idx"].values
+    sd_segment_id = sd_df["segment_id"].values
+    sd_idx_in_seg = sd_df["idx_in_segment"].values
+    sd_t_rel_s = sd_df["t_rel_s"].values
+    sd_T_q = sd_df["T_q"].values
+    sd_RH_q = sd_df["RH_q"].values
+    sd_U_q = sd_df["U_q"].values
+
+    influx_keys = influx_df["key"].values
+    influx_idx = influx_df["influx_idx"].values
+    influx_ts_utc = influx_df["ts_utc"].values
+    influx_ts_epoch = influx_df["ts_epoch"].values
+
+    # Greedy Matching
+    anchors = []
+    current_pos = -1
+    for j in range(len(influx_df)):
+        key = influx_keys[j]
+        positions = sd_index.get(key)
+        if positions is None:
             continue
-        j0 = bisect_right(positions, current_sd_pos)
-        if j0 >= len(positions):
-            # no SD occurrence after current position
+        # Nächste SD-Position nach current_pos
+        insert_idx = bisect_right(positions, current_pos)
+        if insert_idx >= len(positions):
             continue
-        chosen = positions[j0]
-        anchors.append(Anchor(
-            sd_global_idx=chosen,
-            sd_segment_id=int(sd_seg_ids[chosen]),
-            sd_idx_in_segment=int(sd_idx_in_seg[chosen]),
-            sd_t_rel_s=float(sd_t_rel[chosen]),
-            influx_idx=infl.idx,
-            influx_ts_utc=infl.ts_utc,
-            triple_q=infl.triple_q
+        chosen = positions[insert_idx]
+        anchors.append((
+            sd_global_idx[chosen],
+            sd_segment_id[chosen],
+            sd_idx_in_seg[chosen],
+            sd_t_rel_s[chosen],
+            influx_idx[j],
+            influx_ts_utc[j],
+            influx_ts_epoch[j],
+            sd_T_q[chosen],
+            sd_RH_q[chosen],
+            sd_U_q[chosen],
         ))
-        current_sd_pos = chosen
-    return anchors
+        current_pos = chosen
+
+    if not anchors:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(anchors, columns=cols)
+
 
 # ====================
-# 6h Fit‑Anker‑Selektion
+# Zeitmodell: gebinnte Median-Offset-Interpolation
 # ====================
 
-def select_fit_anchors_for_segment(anchors_sorted: List[Anchor]) -> List[Anchor]:
-    if not anchors_sorted: return []
-    w0 = anchors_sorted[0].influx_ts_utc
-    w1 = anchors_sorted[-1].influx_ts_utc
-    grid = pd.Timedelta(hours=FIT_ANCHOR_GRID_HOURS)
-    edge = pd.Timedelta(minutes=EDGE_ANCHOR_WINDOW_MIN)
+def _centered_polyfit(x: np.ndarray, y: np.ndarray, deg: int = 1):
+    """Numerisch stabile Variante von np.polyfit: zentriert x und y vor dem Fit.
 
-    selected: List[Anchor] = []
-    used_ids = set()
-
-    # Startanker
-    start_candidates = [a for a in anchors_sorted if a.influx_ts_utc <= w0 + edge]
-    if start_candidates:
-        a0 = _pick_in_window(start_candidates, ANCHOR_PICK)
-        selected.append(a0); used_ids.add(id(a0))
-
-    # Grid-Selection
-    t = (w0.floor(f"{int(FIT_ANCHOR_GRID_HOURS)}H") if FIT_ANCHOR_GRID_HOURS >= 1.0 else w0)
-    if t < w0: t = w0
-    while t <= w1:
-        t_next = t + grid
-        block = [a for a in anchors_sorted if (a.influx_ts_utc >= t and a.influx_ts_utc < t_next)]
-        if block:
-            a_pick = _pick_in_window(block, ANCHOR_PICK)
-            if id(a_pick) not in used_ids:
-                selected.append(a_pick); used_ids.add(id(a_pick))
-        t = t_next
-
-    # Endanker
-    end_candidates = [a for a in anchors_sorted if a.influx_ts_utc >= w1 - edge]
-    if end_candidates:
-        aE = _pick_in_window(end_candidates, ANCHOR_PICK)
-        if id(aE) not in used_ids:
-            selected.append(aE); used_ids.add(id(aE))
-
-    selected.sort(key=lambda a: a.influx_ts_utc.value)
-    return selected
-
-def _pick_in_window(block: List[Anchor], policy: str) -> Anchor:
-    if policy == "first":
-        return block[0]
-    if policy == "last":
-        return block[-1]
-    bsorted = sorted(block, key=lambda a: a.influx_ts_utc.value)
-    return bsorted[len(bsorted)//2]
-
-# ====================
-# Intervall-Fit (mit Trimming)
-# ====================
-
-def _interval_bounds_for_a(b: float, x: np.ndarray, T: np.ndarray, J: float) -> Tuple[float, float]:
-    A_lower = np.max(T - J - b * x)
-    A_upper = np.min(T - b * x)
-    return A_lower, A_upper
-
-def _project_ls_to_feasible(a0: float, b0: float, x: np.ndarray, T: np.ndarray, J: float) -> Tuple[float, float, bool]:
-    def try_range(center, rel):
-        bs = np.linspace(center*(1-rel), center*(1+rel), 401) if abs(center) > 1e-12 else np.linspace(0.9, 1.1, 401)
-        best = (math.inf, None, None); feasible_any = False
-        for b in bs:
-            A_lower, A_upper = _interval_bounds_for_a(b, x, T, J)
-            if A_lower <= A_upper:
-                feasible_any = True
-                a_star = a0
-                if a_star < A_lower: a_star = A_lower
-                if a_star > A_upper: a_star = A_upper
-                cost = (a_star - a0)**2 + (b - b0)**2
-                if cost < best[0]: best = (cost, a_star, b)
-        return best if feasible_any else None
-
-    y_mid = T - J*0.5
-    b0_hat, a0_hat = np.polyfit(x, y_mid, 1)
-    out = try_range(b0_hat, 0.01) or try_range(1.0, 0.02) or try_range(1.0, 0.1)
-    if not out: return (a0_hat, b0_hat, False)
-    _, a_star, b_star = out
-    return (float(a_star), float(b_star), True)
-
-def fit_with_trim(anchors: List[Anchor], J: float, min_anchors: int):
-    if len(anchors) < max(2, min_anchors):
-        return (math.nan, math.nan, None, None, None, "no_abs_time", "too_few_anchors", [])
-    T = np.array([a.influx_ts_utc.timestamp() for a in anchors], dtype=float)
-    x = np.array([a.sd_t_rel_s for a in anchors], dtype=float)
-    kept = np.arange(len(anchors)); notes = []
-    for it in range(N_TRIM_ITER+1):
-        xk = x[kept]; Tk = T[kept]
-        y_mid = Tk - J*0.5
-        b0, a0 = np.polyfit(xk, y_mid, 1)
-        a, b, feasible = _project_ls_to_feasible(a0, b0, xk, Tk, J)
-        if feasible:
-            tau = a + b * xk
-            rmse_mid = float(np.sqrt(np.mean((y_mid - tau)**2)))
-            j = Tk - tau; j_clip = np.clip(j, 0.0, J)
-            j_med = float(np.median(j_clip)); j_p95 = float(np.percentile(j_clip, 95))
-            if rmse_mid <= 12.0: q = "good"
-            elif rmse_mid <= 20.0: q = "medium"
-            else: q = "poor"
-            if q == "good" and len(kept) < MIN_ANCHORS_GOOD:
-                q = "medium"
-            return (a, b, rmse_mid, j_med, j_p95, q, ";".join(notes), kept.tolist())
-        if it >= N_TRIM_ITER or len(kept) <= max(2, min_anchors):
-            return (a0, b0, None, None, None, "no_abs_time", "no_feasible_after_trim", kept.tolist())
-        tau0 = a0 + b0 * xk
-        below = (Tk - J) - tau0
-        above = tau0 - Tk
-        viol = np.maximum(below, above)
-        k = max(1, int(len(kept) * MAX_TRIM_FRACTION))
-        worst_idx = np.argsort(viol)[-k:]
-        notes.append(f"iter{it}_trim{len(worst_idx)}")
-        kept = np.delete(kept, worst_idx)
-    return (math.nan, math.nan, None, None, None, "no_abs_time", "internal_error", kept.tolist())
-
-# ====================
-# Fensterung & Stitching
-# ====================
-def _extend_fits_to_segment_bounds(fits: List[WindowFit], seg_bounds: SegmentBounds) -> List[WindowFit]:
-    if not fits: 
-        return fits
-    # Kopie erzeugen (immutables vermeiden)
-    out = list(fits)
-    # Sortiert nach x_center (sollte schon segmentweit sein)
-    out.sort(key=lambda f: f.x_center)
-    # Ersten und letzten Fit auf Segmentgrenzen ausdehnen
-    first = out[0]; last = out[-1]
-    changed = False
-    if EXTEND_FITS_TO_SEGMENT_BOUNDS:
-        if first.x_min > seg_bounds.x_min:
-            first.x_min = float(seg_bounds.x_min); changed = True
-        if last.x_max < seg_bounds.x_max:
-            last.x_max = float(seg_bounds.x_max); changed = True
-    return out
+    Bei großen Offset-Werten (~1.7e9) ist np.polyfit ohne Zentrierung instabil.
+    Returns: (coeffs, x_mean, y_mean) wobei coeffs auf zentrierte Daten passen.
+    """
+    x_mean, y_mean = x.mean(), y.mean()
+    coeffs = np.polyfit(x - x_mean, y - y_mean, deg)
+    return coeffs, x_mean, y_mean
 
 
-@dataclass
-class SegmentBounds:
-    x_min: float
-    x_max: float
-
-def build_time_windows(anchors_sorted: List[Anchor], window_days: float, overlap_hours: float) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    if not anchors_sorted: return []
-    first = anchors_sorted[0].influx_ts_utc
-    last = anchors_sorted[-1].influx_ts_utc
-    win = pd.Timedelta(days=window_days)
-    step = win - pd.Timedelta(hours=overlap_hours)
-    if step <= pd.Timedelta(0):
-        step = pd.Timedelta(hours=1)
-    windows = []
-    t0 = first
-    while t0 <= last:
-        t1 = t0 + win
-        windows.append((t0, t1))
-        t0 = t0 + step
-    return windows
+def _eval_centered_linear(x: np.ndarray, coeffs, x_mean: float, y_mean: float) -> np.ndarray:
+    """Wertet einen zentrierten linearen Fit aus: y = y_mean + b*(x - x_mean) + a."""
+    b, a = coeffs
+    return y_mean + a + b * (x - x_mean)
 
 
-def fit_windows_for_segment(seg_id: int, anchors_sorted: List[Anchor], fit_anchors_sorted: List[Anchor], seg_bounds: SegmentBounds) -> List[WindowFit]:
-    windows = build_time_windows(anchors_sorted, WINDOW_DAYS, WINDOW_OVERLAP_HOURS)
-    fits: List[WindowFit] = []
-    for (w0, w1) in windows:
-        # primary: use selected FIT anchors within window
-        sub_fit = [a for a in fit_anchors_sorted if (a.influx_ts_utc >= w0 and a.influx_ts_utc <= w1)]
-        anchors_for_this_window = None
-        if len(sub_fit) >= MIN_ANCHORS_PER_WINDOW:
-            anchors_for_this_window = sub_fit
+def _trim_outliers(x: np.ndarray, offset: np.ndarray, J: float) -> np.ndarray:
+    """Iteratives Trimming: entfernt Anker, deren Offset stark vom lokalen Trend abweicht.
+
+    Returns: Boolean-Maske der behaltenen Anker.
+    """
+    kept = np.ones(len(x), dtype=bool)
+    for iteration in range(N_TRIM_ITER):
+        xk, ok = x[kept], offset[kept]
+        if len(xk) < max(2, MIN_ANCHORS_FOR_FIT):
+            break
+        # Linearer Trend als Referenz (zentriert für numerische Stabilität)
+        coeffs, xm, om = _centered_polyfit(xk, ok, 1)
+        trend = _eval_centered_linear(xk, coeffs, xm, om)
+        residuals = np.abs(ok - trend)
+        # Maximal MAX_TRIM_FRACTION der Punkte entfernen
+        k = max(1, int(len(xk) * MAX_TRIM_FRACTION))
+        threshold = np.sort(residuals)[-k]
+        if threshold <= J:
+            break
+        # Nur die schlimmsten entfernen
+        worst = residuals >= threshold
+        kept_indices = np.where(kept)[0]
+        kept[kept_indices[worst]] = False
+    return kept
+
+
+def fit_segment(anchors_seg: pd.DataFrame, J: float):
+    """Berechnet die Zeitabbildung für ein Segment mittels gebinnter Median-Interpolation.
+
+    Returns: (x_grid, offset_grid, rmse, jitter_med, jitter_p95, quality, n_anchors)
+        x_grid, offset_grid: Stützstellen für np.interp
+        Oder None wenn zu wenige Anker.
+    """
+    x = anchors_seg["t_rel_s"].values.astype(float)
+    T = anchors_seg["ts_epoch"].values.astype(float)
+    raw_offset = T - x  # offset_i = T_influx_i - x_rel_i
+
+    if len(x) < MIN_ANCHORS_FOR_FIT:
+        return None
+
+    # 1. Trimming: Ausreißer entfernen
+    kept = _trim_outliers(x, raw_offset, J)
+    x_clean = x[kept]
+    offset_clean = raw_offset[kept]
+
+    if len(x_clean) < MIN_ANCHORS_FOR_FIT:
+        return None
+
+    # 2. In Zeitbins aufteilen und Median berechnen
+    bin_width_s = BIN_HOURS * 3600.0
+    x_min, x_max = x_clean.min(), x_clean.max()
+    bin_edges = np.arange(x_min, x_max + bin_width_s, bin_width_s)
+
+    x_grid = []
+    offset_grid = []
+    for i in range(len(bin_edges) - 1):
+        mask = (x_clean >= bin_edges[i]) & (x_clean < bin_edges[i + 1])
+        if mask.sum() >= MIN_ANCHORS_PER_BIN:
+            x_grid.append(np.median(x_clean[mask]))
+            # Jitter-Korrektur: median(T - x) - J/2 ≈ wahrer Offset
+            offset_grid.append(np.median(offset_clean[mask]) - J / 2.0)
+
+    if len(x_grid) < 2:
+        # Fallback: ein einziger linearer Fit über alle Anker (zentriert)
+        if len(x_clean) >= 2:
+            coeffs, xm, om = _centered_polyfit(x_clean, offset_clean - J / 2.0, 1)
+            x_grid = np.array([x_min, x_max])
+            offset_grid = np.array([
+                _eval_centered_linear(np.array([x_min]), coeffs, xm, om)[0],
+                _eval_centered_linear(np.array([x_max]), coeffs, xm, om)[0],
+            ])
         else:
-            # fallback: use ALL anchors in this window if enough
-            sub_all = [a for a in anchors_sorted if (a.influx_ts_utc >= w0 and a.influx_ts_utc <= w1)]
-            if len(sub_all) >= MIN_ANCHORS_PER_WINDOW_ALL:
-                anchors_for_this_window = sub_all
+            return None
+    else:
+        x_grid = np.array(x_grid)
+        offset_grid = np.array(offset_grid)
 
-        if anchors_for_this_window is None:
-            continue
+    # 3. Qualitätsmetriken berechnen (auf allen sauberen Ankern)
+    tau_interp = x_clean + np.interp(x_clean, x_grid, offset_grid)
+    T_clean = x_clean + offset_clean
+    jitter = T_clean - tau_interp
+    jitter_clipped = np.clip(jitter, 0.0, J)
+    y_mid = T_clean - J / 2.0
+    rmse = float(np.sqrt(np.mean((y_mid - tau_interp) ** 2)))
+    jitter_med = float(np.median(jitter_clipped))
+    jitter_p95 = float(np.percentile(jitter_clipped, 95))
+    n_anchors = int(kept.sum())
 
-        a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(anchors_for_this_window, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
-        if q == "no_abs_time":
-            continue
-        xs = [a_.sd_t_rel_s for a_ in anchors_for_this_window]
-        xm, xM = float(min(xs)), float(max(xs))
-        xc = 0.5*(xm + xM)
-        fits.append(WindowFit(seg_id, w0, w1, xm, xM, xc, a, b, rmse, j_med, j_p95, len(anchors_for_this_window), q, notes))
+    if rmse <= RMSE_GOOD_S and n_anchors >= MIN_ANCHORS_GOOD:
+        quality = "good"
+    elif rmse <= RMSE_MED_S:
+        quality = "medium"
+    else:
+        quality = "poor"
 
-    # segment-wide fallbacks if no windows
-    if not fits and WINDOW_FALLBACK_SEGMENT_FIT:
-        # (a) try with FIT anchors across entire segment
-        if len(fit_anchors_sorted) >= MIN_ANCHORS_FOR_SEGMENT_FALLBACK:
-            xs = [a_.sd_t_rel_s for a_ in fit_anchors_sorted]
-            if xs:
-                xm, xM = float(min(xs)), float(max(xs))
-                seg_span = (xM - xm)
-                coverage_frac = 1.0 if seg_span > 0 else 0.0
-                if coverage_frac >= MIN_FALLBACK_COVERAGE_FRAC:
-                    a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(fit_anchors_sorted, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
-                    if q != "no_abs_time":
-                        xc = 0.5*(xm+xM)
-                        if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
-                            xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
-                            xc = 0.5*(xm+xM)
-                        fits.append(WindowFit(seg_id, fit_anchors_sorted[0].influx_ts_utc, fit_anchors_sorted[-1].influx_ts_utc,
-                                              xm, xM, xc, a, b, rmse, j_med, j_p95, len(fit_anchors_sorted), q, notes))
-        # (b) if still no fits, try ALL anchors across segment
-        if not fits and len(anchors_sorted) >= MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL:
-            xs = [a_.sd_t_rel_s for a_ in anchors_sorted]
-            if xs:
-                xm, xM = float(min(xs)), float(max(xs))
-                if (xM - xm) > 0:
-                    a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(anchors_sorted, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
-                    if q != "no_abs_time":
-                        xc = 0.5*(xm+xM)
-                        if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
-                            xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
-                            xc = 0.5*(xm+xM)
-                        fits.append(WindowFit(seg_id, anchors_sorted[0].influx_ts_utc, anchors_sorted[-1].influx_ts_utc,
-                                              xm, xM, xc, a, b, rmse, j_med, j_p95, len(anchors_sorted), q, notes))
-    return fits
+    # Drift in ppm (aus zentriertem linearem Fit über die Grid-Punkte)
+    if len(x_grid) >= 2:
+        coeffs_drift, _, _ = _centered_polyfit(x_grid, offset_grid, 1)
+        drift_ppm = float(coeffs_drift[0]) * 1e6
+    else:
+        drift_ppm = 0.0
+
+    return {
+        "x_grid": x_grid,
+        "offset_grid": offset_grid,
+        "rmse": rmse,
+        "jitter_med": jitter_med,
+        "jitter_p95": jitter_p95,
+        "quality": quality,
+        "n_anchors": n_anchors,
+        "drift_ppm": drift_ppm,
+        "x_min": float(x_min),
+        "x_max": float(x_max),
+    }
 
 
-def choose_window_for_point(x: float, fits: List[WindowFit]) -> Optional[WindowFit]:
-    if not fits: return None
-    pad = STITCH_PAD_S if not STITCH_WITHIN_ONLY else 0.0
-    candidates = [f for f in fits if (x >= f.x_min - pad and x <= f.x_max + pad)]
-    if STITCH_WITHIN_ONLY:
-        candidates = [f for f in candidates if (x >= f.x_min and x <= f.x_max)]
-    if candidates:
-        return min(candidates, key=lambda f: abs(x - f.x_center))
-    return None
+def apply_time_mapping(sd_seg: pd.DataFrame, fit_result) -> Tuple[np.ndarray, np.ndarray]:
+    """Wendet die Zeitabbildung auf alle SD-Punkte eines Segments an.
+
+    Returns: (t_abs_epoch, quality_flags) Arrays
+    """
+    x = sd_seg["t_rel_s"].values.astype(float)
+    n = len(x)
+
+    if fit_result is None:
+        return np.full(n, np.nan), np.array(["no_abs_time"] * n, dtype=object)
+
+    x_grid = fit_result["x_grid"]
+    offset_grid = fit_result["offset_grid"]
+    quality = fit_result["quality"]
+
+    # np.interp extrapoliert mit den Randwerten (flat extrapolation) — genau richtig
+    offsets = np.interp(x, x_grid, offset_grid)
+    t_abs = x + offsets
+
+    flags = np.array([quality] * n, dtype=object)
+    return t_abs, flags
+
 
 # ====================
-# Reports / IO
+# Reports / Output
 # ====================
 
-def make_outputs(sd_points: List[SDPoint],
-                 fits_by_segment: Dict[int, List[WindowFit]],
-                 out_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    rows_abs = []
-    for p in sd_points:
-        fits = fits_by_segment.get(p.segment_id, [])
-        wf = choose_window_for_point(p.t_rel_s, fits)
-        if wf is not None:
-            t_abs_epoch = wf.a + wf.b * p.t_rel_s
-            t_abs = pd.to_datetime(t_abs_epoch, unit="s", utc=True)
-            q = wf.quality
+def make_outputs(sd_df: pd.DataFrame, t_abs_all: np.ndarray,
+                 quality_all: np.ndarray, out_dir: Path) -> pd.DataFrame:
+    """Schreibt SD_absolute.csv."""
+    t_abs_utc = []
+    for epoch in t_abs_all:
+        if np.isnan(epoch):
+            t_abs_utc.append("")
         else:
-            t_abs = pd.NaT; q = "no_abs_time"
-        rows_abs.append({
-            "segment_id": p.segment_id,
-            "idx_sd_global": p.global_idx,
-            "idx_in_segment": p.idx_in_segment,
-            "t_rel_s": round(p.t_rel_s, 3),
-            "t_abs_utc": t_abs.isoformat() if pd.notna(t_abs) else "",
-            "T_C": p.triple_q.T_q,
-            "RH_pct": p.triple_q.RH_q,
-            "U_V": p.triple_q.U_q,
-            "quality_flag": q
-        })
-    df_abs = pd.DataFrame(rows_abs)
+            t_abs_utc.append(pd.to_datetime(epoch, unit="s", utc=True).isoformat())
 
-    rows_seg = []
-    seg_ids = sorted({p.segment_id for p in sd_points})
-    for seg_id in seg_ids:
-        fits = fits_by_segment.get(seg_id, [])
-        if fits:
-            rmse_vals = [f.rmse_mid for f in fits if f.rmse_mid is not None]
-            jitter_meds = [f.jitter_med for f in fits if f.jitter_med is not None]
-            jitter_p95s = [f.jitter_p95 for f in fits if f.jitter_p95 is not None]
-            drift_ppm_vals = [ (f.b - 1.0)*1e6 for f in fits ]
-            rmse_med = float(np.median(rmse_vals)) if rmse_vals else None
-            jitter_med_all = float(np.median(jitter_meds)) if jitter_meds else None
-            jitter_p95_all = float(np.median(jitter_p95s)) if jitter_p95s else None
-            drift_ppm_med = float(np.median(drift_ppm_vals)) if drift_ppm_vals else None
-            if rmse_med is not None and rmse_med <= 12.0 and np.median([f.n_anchors for f in fits]) >= MIN_ANCHORS_GOOD:
-                qflag = "good"
-            elif rmse_med is not None and rmse_med <= 20.0:
-                qflag = "medium"
-            else:
-                qflag = "poor"
-            notes = f"windows:{len(fits)}"
-        else:
-            qflag = "no_abs_time"; rmse_med = None; jitter_med_all = None; jitter_p95_all = None; drift_ppm_med = None; notes = "no_windows"
-        n_points = sum(1 for p in sd_points if p.segment_id==seg_id)
-        rows_seg.append({
-            "segment_id": seg_id,
-            "n_points": n_points,
-            "n_windows": len(fits),
-            "rmse_to_mid_s_median": rmse_med,
-            "jitter_median_s_overall": jitter_med_all,
-            "jitter_p95_s_overall": jitter_p95_all,
-            "drift_ppm_median": drift_ppm_med,
-            "quality_flag": qflag,
-            "notes": notes
-        })
-    df_seg = pd.DataFrame(rows_seg)
-    df_abs.to_csv(out_dir / OUT_SD_ABSOLUTE, index=False)
-    df_seg.to_csv(out_dir / OUT_SEGMENT_REPORT, index=False)
-    return df_abs, df_seg
+    df_out = pd.DataFrame({
+        "segment_id": sd_df["segment_id"].values,
+        "idx_sd_global": sd_df["global_idx"].values,
+        "idx_in_segment": sd_df["idx_in_segment"].values,
+        "t_rel_s": np.round(sd_df["t_rel_s"].values, 3),
+        "t_abs_utc": t_abs_utc,
+        "T_C": [_format_val(v, TEMP_DECIMALS) for v in sd_df["T_q"].values],
+        "RH_pct": [_format_val(v, RH_DECIMALS) for v in sd_df["RH_q"].values],
+        "U_V": [_format_val(v, BAT_DECIMALS) for v in sd_df["U_q"].values],
+        "quality_flag": quality_all,
+    })
+    df_out.to_csv(out_dir / OUT_SD_ABSOLUTE, index=False)
+    return df_out
 
-def build_anchor_report(anchors_by_segment: Dict[int, List[Anchor]],
-                        fits_by_segment: Dict[int, List[WindowFit]],
+
+def make_segment_report(sd_df: pd.DataFrame, fit_results: Dict,
                         out_dir: Path) -> pd.DataFrame:
+    """Schreibt Segment_report.csv."""
     rows = []
-    for seg_id, anchors in anchors_by_segment.items():
-        fits = fits_by_segment.get(seg_id, [])
-        for a in anchors:
-            wf = choose_window_for_point(a.sd_t_rel_s, fits)
-            tau = None; jitter = None
-            if wf is not None:
-                tau_epoch = wf.a + wf.b * a.sd_t_rel_s
-                tau = pd.to_datetime(tau_epoch, unit="s", utc=True)
-                jitter = a.influx_ts_utc.timestamp() - tau_epoch
+    for seg_id in sorted(sd_df["segment_id"].unique()):
+        n_points = int((sd_df["segment_id"] == seg_id).sum())
+        fit = fit_results.get(seg_id)
+        if fit is not None:
             rows.append({
                 "segment_id": seg_id,
-                "idx_sd_global": a.sd_global_idx,
-                "idx_in_segment": a.sd_idx_in_segment,
-                "sd_t_rel_s": round(a.sd_t_rel_s, 3),
-                "influx_ts_utc": a.influx_ts_utc.isoformat(),
-                "T_q": a.triple_q.T_q,
-                "RH_q": a.triple_q.RH_q,
-                "U_q": a.triple_q.U_q,
+                "n_points": n_points,
+                "n_grid_points": len(fit["x_grid"]),
+                "rmse_to_mid_s_median": fit["rmse"],
+                "jitter_median_s_overall": fit["jitter_med"],
+                "jitter_p95_s_overall": fit["jitter_p95"],
+                "drift_ppm_median": fit["drift_ppm"],
+                "quality_flag": fit["quality"],
+                "notes": f"anchors:{fit['n_anchors']}",
+            })
+        else:
+            rows.append({
+                "segment_id": seg_id,
+                "n_points": n_points,
+                "n_grid_points": 0,
+                "rmse_to_mid_s_median": None,
+                "jitter_median_s_overall": None,
+                "jitter_p95_s_overall": None,
+                "drift_ppm_median": None,
+                "quality_flag": "no_abs_time",
+                "notes": "no_anchors",
+            })
+    df = pd.DataFrame(rows)
+    df.to_csv(out_dir / OUT_SEGMENT_REPORT, index=False)
+    return df
+
+
+def make_anchor_report(anchors_df: pd.DataFrame, fit_results: Dict,
+                       out_dir: Path) -> pd.DataFrame:
+    """Schreibt Anchors_report.csv."""
+    rows = []
+    for seg_id, group in anchors_df.groupby("segment_id"):
+        fit = fit_results.get(seg_id)
+        for _, a in group.iterrows():
+            tau = None
+            jitter = None
+            if fit is not None:
+                tau_epoch = a["t_rel_s"] + np.interp(
+                    a["t_rel_s"], fit["x_grid"], fit["offset_grid"]
+                )
+                tau = pd.to_datetime(tau_epoch, unit="s", utc=True)
+                jitter = a["ts_epoch"] - tau_epoch
+            rows.append({
+                "segment_id": seg_id,
+                "idx_sd_global": a["sd_global_idx"],
+                "idx_in_segment": a["idx_in_segment"],
+                "sd_t_rel_s": round(a["t_rel_s"], 3),
+                "influx_ts_utc": pd.to_datetime(a["ts_utc"], utc=True).isoformat(),
+                "T_q": _format_val(a["T_q"], TEMP_DECIMALS),
+                "RH_q": _format_val(a["RH_q"], RH_DECIMALS),
+                "U_q": _format_val(a["U_q"], BAT_DECIMALS),
                 "tau_abs_utc": tau.isoformat() if tau is not None else "",
-                "jitter_s": jitter
+                "jitter_s": jitter,
             })
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / OUT_ANCHOR_REPORT, index=False)
     return df
 
-def plausibility_checks(sd_points: List[SDPoint], influx_points: List[InfluxPoint], out_dir: Path,
-                         anchors_all: Optional[List[Anchor]] = None) -> pd.DataFrame:
+
+def make_plausibility_report(sd_df: pd.DataFrame, influx_df: pd.DataFrame,
+                             anchors_df: pd.DataFrame, out_dir: Path) -> pd.DataFrame:
+    """Schreibt Plausibility_report.csv."""
     from collections import Counter
-    sd_counts = Counter(triple_key(p.triple_q) for p in sd_points)
-    in_counts = Counter(triple_key(p.triple_q) for p in influx_points)
-    offenders = sum(1 for k,v in in_counts.items() if v > sd_counts.get(k,0))
-    if anchors_all is None:
-        anchors_all = robust_anchor_match(sd_points, influx_points, J_MAX_SECONDS)
-    coverage = len(anchors_all) / max(1, len(influx_points))
+    sd_counts = Counter(sd_df["key"].values)
+    in_counts = Counter(influx_df["key"].values)
+    offenders = sum(1 for k, v in in_counts.items() if v > sd_counts.get(k, 0))
+    coverage = len(anchors_df) / max(1, len(influx_df))
     df = pd.DataFrame([{
-        "influx_count": len(influx_points),
-        "sd_count": len(sd_points),
+        "influx_count": len(influx_df),
+        "sd_count": len(sd_df),
         "matched_influx_fraction": round(coverage, 6),
-        "influx_values_missing_on_sd": offenders
+        "influx_values_missing_on_sd": offenders,
     }])
     df.to_csv(out_dir / OUT_PLAUSIBILITY_REPORT, index=False)
     return df
+
 
 # ====================
 # Main
@@ -792,52 +662,56 @@ def plausibility_checks(sd_points: List[SDPoint], influx_points: List[InfluxPoin
 def main():
     cli_args = _apply_cli_overrides()
     _apply_config_overrides(cli_args.config)
+
     sd_paths, influx_paths, out_dir = resolve_paths()
-    sd_points = read_sd_files(sd_paths)
-    influx_points = read_influx_files(influx_paths)
-    print(f"[INFO] Loaded SD points: {len(sd_points)} | Influx points: {len(influx_points)}")
+    sd_df = read_sd_files(sd_paths)
+    influx_df = read_influx_files(influx_paths)
+    print(f"[INFO] SD-Punkte: {len(sd_df)} | Influx-Punkte: {len(influx_df)}")
 
-    anchors_all = robust_anchor_match(sd_points, influx_points, J_MAX_SECONDS)
+    # Matching
+    anchors_df = greedy_anchor_match(sd_df, influx_df)
+    print(f"[INFO] Anker gesamt: {len(anchors_df)}")
 
-    plaus = plausibility_checks(sd_points, influx_points, out_dir, anchors_all=anchors_all)
-    anchors_by_segment: Dict[int, List[Anchor]] = defaultdict(list)
-    for a in anchors_all: anchors_by_segment[a.sd_segment_id].append(a)
-    for seg in anchors_by_segment: anchors_by_segment[seg].sort(key=lambda x: x.influx_ts_utc)
+    # Plausibilität
+    make_plausibility_report(sd_df, influx_df, anchors_df, out_dir)
 
-    seg_bounds: Dict[int, Tuple[float,float]] = defaultdict(lambda: (float('inf'), float('-inf')))
-    for p in sd_points:
-        lo, hi = seg_bounds[p.segment_id]
-        lo = min(lo, p.t_rel_s); hi = max(hi, p.t_rel_s)
-        seg_bounds[p.segment_id] = (lo, hi)
+    # Pro Segment: Zeitabbildung berechnen
+    fit_results: Dict = {}
+    t_abs_all = np.full(len(sd_df), np.nan)
+    quality_all = np.array(["no_abs_time"] * len(sd_df), dtype=object)
 
-    fit_anchors_by_segment: Dict[int, List[Anchor]] = {}
-    for seg_id, anchors in anchors_by_segment.items():
-        fit_anchors_by_segment[seg_id] = select_fit_anchors_for_segment(anchors)
+    for seg_id in sorted(sd_df["segment_id"].unique()):
+        seg_anchors = anchors_df[anchors_df["segment_id"] == seg_id]
+        seg_mask = sd_df["segment_id"] == seg_id
 
-    # Debug: per-segment anchor stats
-    for seg_id, anc in anchors_by_segment.items():
-        print(f"[INFO] Segment {seg_id}: anchors={len(anc)} fit_anchors={len(fit_anchors_by_segment.get(seg_id, []))}")
+        print(f"[INFO] Segment {seg_id}: {seg_mask.sum()} Punkte, {len(seg_anchors)} Anker")
 
-    fits_by_segment: Dict[int, List[WindowFit]] = {}
-    for seg_id, anchors in anchors_by_segment.items():
-        fit_anc = fit_anchors_by_segment.get(seg_id, [])
-        bounds = seg_bounds[seg_id]
-        sb = SegmentBounds(bounds[0], bounds[1])
-        fits_by_segment[seg_id] = fit_windows_for_segment(seg_id, anchors, fit_anc, sb)
-        fits_by_segment[seg_id] = _extend_fits_to_segment_bounds(fits_by_segment[seg_id], sb)
-        print(f"[INFO] Segment {seg_id}: windows=" + str(len(fits_by_segment.get(seg_id, []))))
+        fit = fit_segment(seg_anchors, J_MAX_SECONDS)
+        fit_results[seg_id] = fit
 
-    df_abs, df_seg = make_outputs(sd_points, fits_by_segment, out_dir)
-    df_anch = build_anchor_report(anchors_by_segment, fits_by_segment, out_dir)
+        t_abs_seg, quality_seg = apply_time_mapping(sd_df[seg_mask], fit)
+        t_abs_all[seg_mask] = t_abs_seg
+        quality_all[seg_mask] = quality_seg
 
-    total_windows = sum(len(v) for v in fits_by_segment.values())
-    print("=== dl-sd-card-date ===")
-    print(f"[INFO] Anchors total: {sum(len(v) for v in anchors_by_segment.values())} | Windows: {total_windows}")
-    print("[INFO] Wrote files:")
-    print("  SD_absolute:", (out_dir / OUT_SD_ABSOLUTE))
-    print("  Segment_report:", (out_dir / OUT_SEGMENT_REPORT))
-    print("  Anchors_report:", (out_dir / OUT_ANCHOR_REPORT))
-    print("  Plausibility_report:", (out_dir / OUT_PLAUSIBILITY_REPORT))
+        if fit is not None:
+            print(f"         → {fit['quality']} (RMSE={fit['rmse']:.2f}s, "
+                  f"drift={fit['drift_ppm']:.1f}ppm, "
+                  f"grid={len(fit['x_grid'])} Stützstellen)")
+        else:
+            print(f"         → no_abs_time")
+
+    # Output schreiben
+    make_outputs(sd_df, t_abs_all, quality_all, out_dir)
+    make_segment_report(sd_df, fit_results, out_dir)
+    make_anchor_report(anchors_df, fit_results, out_dir)
+
+    print("=== dl-sd-card-date v2 ===")
+    print("[INFO] Dateien geschrieben:")
+    print(f"  SD_absolute:        {out_dir / OUT_SD_ABSOLUTE}")
+    print(f"  Segment_report:     {out_dir / OUT_SEGMENT_REPORT}")
+    print(f"  Anchors_report:     {out_dir / OUT_ANCHOR_REPORT}")
+    print(f"  Plausibility_report: {out_dir / OUT_PLAUSIBILITY_REPORT}")
+
 
 if __name__ == "__main__":
     main()
