@@ -302,9 +302,9 @@ def sd_raw_to_quantized(temp_raw: int, rh_raw: int, bat_raw: int,
 
 def influx_phys_to_quantized(T_val: str, RH_val: str, U_val: str,
                              dT: int, dRH: int, dU: int) -> SDTripleQ:
-    T = _quantize_half_up(Decimal(T_val), TEMP_DECIMALS)
-    RH = _quantize_half_up(Decimal(RH_val), RH_DECIMALS)
-    U = _quantize_half_up(Decimal(U_val), BAT_DECIMALS)
+    T = _quantize_half_up(Decimal(T_val), dT)
+    RH = _quantize_half_up(Decimal(RH_val), dRH)
+    U = _quantize_half_up(Decimal(U_val), dU)
     return SDTripleQ(_format_dec(T), _format_dec(RH), _format_dec(U))
 
 def triple_key(q: SDTripleQ) -> str: return f"{q.T_q}|{q.RH_q}|{q.U_q}"
@@ -637,11 +637,11 @@ def fit_windows_for_segment(seg_id: int, anchors_sorted: List[Anchor], fit_ancho
                     a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(fit_anchors_sorted, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
                     if q != "no_abs_time":
                         xc = 0.5*(xm+xM)
-                    if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
-                        xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
-                        xc = 0.5*(xm+xM)
-                    fits.append(WindowFit(seg_id, fit_anchors_sorted[0].influx_ts_utc, fit_anchors_sorted[-1].influx_ts_utc,
-                                          xm, xM, xc, a, b, rmse, j_med, j_p95, len(fit_anchors_sorted), q, notes))
+                        if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
+                            xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
+                            xc = 0.5*(xm+xM)
+                        fits.append(WindowFit(seg_id, fit_anchors_sorted[0].influx_ts_utc, fit_anchors_sorted[-1].influx_ts_utc,
+                                              xm, xM, xc, a, b, rmse, j_med, j_p95, len(fit_anchors_sorted), q, notes))
         # (b) if still no fits, try ALL anchors across segment
         if not fits and len(anchors_sorted) >= MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL:
             xs = [a_.sd_t_rel_s for a_ in anchors_sorted]
@@ -651,11 +651,11 @@ def fit_windows_for_segment(seg_id: int, anchors_sorted: List[Anchor], fit_ancho
                     a, b, rmse, j_med, j_p95, q, notes, kept = fit_with_trim(anchors_sorted, J_MAX_SECONDS, MIN_ANCHORS_FOR_FIT)
                     if q != "no_abs_time":
                         xc = 0.5*(xm+xM)
-                    if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
-                        xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
-                        xc = 0.5*(xm+xM)
-                    fits.append(WindowFit(seg_id, anchors_sorted[0].influx_ts_utc, anchors_sorted[-1].influx_ts_utc,
-                                          xm, xM, xc, a, b, rmse, j_med, j_p95, len(anchors_sorted), q, notes))
+                        if FALLBACK_EXTEND_TO_SEGMENT_BOUNDS:
+                            xm, xM = float(seg_bounds.x_min), float(seg_bounds.x_max)
+                            xc = 0.5*(xm+xM)
+                        fits.append(WindowFit(seg_id, anchors_sorted[0].influx_ts_utc, anchors_sorted[-1].influx_ts_utc,
+                                              xm, xM, xc, a, b, rmse, j_med, j_p95, len(anchors_sorted), q, notes))
     return fits
 
 
@@ -767,12 +767,14 @@ def build_anchor_report(anchors_by_segment: Dict[int, List[Anchor]],
     df.to_csv(out_dir / OUT_ANCHOR_REPORT, index=False)
     return df
 
-def plausibility_checks(sd_points: List[SDPoint], influx_points: List[InfluxPoint], out_dir: Path) -> pd.DataFrame:
+def plausibility_checks(sd_points: List[SDPoint], influx_points: List[InfluxPoint], out_dir: Path,
+                         anchors_all: Optional[List[Anchor]] = None) -> pd.DataFrame:
     from collections import Counter
     sd_counts = Counter(triple_key(p.triple_q) for p in sd_points)
     in_counts = Counter(triple_key(p.triple_q) for p in influx_points)
     offenders = sum(1 for k,v in in_counts.items() if v > sd_counts.get(k,0))
-    anchors_all = robust_anchor_match(sd_points, influx_points, J_MAX_SECONDS)
+    if anchors_all is None:
+        anchors_all = robust_anchor_match(sd_points, influx_points, J_MAX_SECONDS)
     coverage = len(anchors_all) / max(1, len(influx_points))
     df = pd.DataFrame([{
         "influx_count": len(influx_points),
@@ -788,14 +790,16 @@ def plausibility_checks(sd_points: List[SDPoint], influx_points: List[InfluxPoin
 # ====================
 
 def main():
+    cli_args = _apply_cli_overrides()
+    _apply_config_overrides(cli_args.config)
     sd_paths, influx_paths, out_dir = resolve_paths()
     sd_points = read_sd_files(sd_paths)
     influx_points = read_influx_files(influx_paths)
     print(f"[INFO] Loaded SD points: {len(sd_points)} | Influx points: {len(influx_points)}")
 
-    plaus = plausibility_checks(sd_points, influx_points, out_dir)
-
     anchors_all = robust_anchor_match(sd_points, influx_points, J_MAX_SECONDS)
+
+    plaus = plausibility_checks(sd_points, influx_points, out_dir, anchors_all=anchors_all)
     anchors_by_segment: Dict[int, List[Anchor]] = defaultdict(list)
     for a in anchors_all: anchors_by_segment[a.sd_segment_id].append(a)
     for seg in anchors_by_segment: anchors_by_segment[seg].sort(key=lambda x: x.influx_ts_utc)
