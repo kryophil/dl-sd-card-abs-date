@@ -1,6 +1,6 @@
 # dl-sd-card-date
 
-Absolute Datierung von SD-Karten-Rohdaten (Decentlab DL-SHT35) anhand von Influx-Exports – robust gegen Jitter, Resets und Drift.
+Absolute Datierung von SD-Karten-Rohdaten (Decentlab DL-SHT35) anhand von LoRaWAN-Referenzdaten – robust gegen Jitter, Resets und Drift.
 
 ---
 
@@ -9,10 +9,9 @@ Absolute Datierung von SD-Karten-Rohdaten (Decentlab DL-SHT35) anhand von Influx
 Sensorwerte (Temperatur, rel. Feuchte, Batteriespannung) werden auf der **SD-Karte** im Rohformat mit **relativen Zeiten seit letztem Reset** gespeichert. Eine **Teilmenge** dieser Werte wird (mit zufälligem Übermittlungs-Jitter) via LoRa an eine **Influx-Datenbank** übertragen und dort mit **absoluten UTC-Zeitstempeln** abgelegt.
 
 Dieses Script datiert **alle SD-Rohwerte** absolut, indem es:
-- **exakte Tripel-Übereinstimmungen** `(T, RH, U)` zwischen SD und Influx findet (nach definierter Stückelung),
-- die SD-Zeitachse pro Segment (Reset-bis-Reset) per **linearem Fit** gegen die Influx-Zeitachse kalibriert,
-- dabei **Jitter** und **Uhrdrift** berücksichtigt,
-- und Lücken über **Fenster** (Windows) und **Fallbacks** robust schließt.
+- **exakte Tripel-Übereinstimmungen** `(T, RH, U)` zwischen SD und Influx findet (nach definierter Quantisierung),
+- die SD-Zeitachse pro Segment (Reset-bis-Reset) per **gebinnter Median-Offset-Interpolation** gegen die Influx-Zeitachse kalibriert,
+- dabei **Jitter** und **Uhrdrift** berücksichtigt.
 
 Ergebnis sind **UTC-Zeitstempel** für (nahezu) alle SD-Messpunkte.
 
@@ -22,10 +21,10 @@ Ergebnis sind **UTC-Zeitstempel** für (nahezu) alle SD-Messpunkte.
 
 ### SD-Karte: `*_SDCard_raw_*.csv` (ohne Header, Komma-getrennt)
 
-Spalten:  
+Spalten:
 `time, temp_raw, rh_raw, bat_raw`
 
-Umrechnungen:
+Umrechnungen (für DL-SHT35, konfigurierbar):
 ```
 t_rel_s   = time / 1024                             # Sekunden seit letztem Reset
 T (°C)    = temp_raw * 175 / 65535 - 45
@@ -40,63 +39,47 @@ Spalten (Bezeichner werden automatisch erkannt):
 - zweite Spalte: Timezone-Offset (nicht genutzt, Daten sind UTC),
 - weitere Spalten: `*battery*`, `*humid*`, `*temp*`.
 
-**Wichtig:** Influx enthält **nur** die erfolgreich übertragenen Werte (Teilmenge der SD-Werte) und weist **zufälligen Übermittlungs-Jitter** auf.
+**Wichtig:** Influx enthält **nur** die erfolgreich übertragenen Werte (Teilmenge der SD-Werte) und weist **zufälligen Übermittlungs-Jitter** auf (typisch 0–8 s).
 
 ---
 
 ## Konzept (Kurzfassung)
 
-1. **Segmentierung:**  
+1. **Segmentierung:**
    SD-Rohdaten werden in **Segmente** geschnitten, sobald `t_rel_s` **negativ springt** → Reset/Unterbruch/Testwechsel.
 
-2. **Exakte Tripel-Anker (LCS-artig, ordnungserhaltend):**  
-   - Physikalische Größen werden **quantisiert** mit `ROUND_HALF_UP`:  
-     - Temperatur: **10** Nachkommastellen  
-     - rel. Feuchte: **8** Nachkommastellen  
-     - Spannung: **3** Nachkommastellen  
-   - Ein SD-Punkt und ein Influx-Punkt bilden einen **Anker**, wenn ihre quantisierten Tripel **exakt gleich** sind.  
-   - Greedy, **ordnungserhaltend**: Für eine Influx-Messung wird immer die **nächste** passende SD-Position nach der zuletzt verankerten gewählt.  
-   - Dadurch sind **Duplikate/gleichzeitige Messungen** handhabbar, und die SD-Reihenfolge bleibt gewahrt.
+2. **Exakte Tripel-Anker (ordnungserhaltend):**
+   - Physikalische Größen werden **quantisiert** mit `ROUND_HALF_UP`:
+     - Temperatur: **10** Nachkommastellen
+     - rel. Feuchte: **8** Nachkommastellen
+     - Spannung: **3** Nachkommastellen
+   - Ein SD-Punkt und ein Influx-Punkt bilden einen **Anker**, wenn ihre quantisierten Tripel **exakt gleich** sind.
+   - Greedy, **ordnungserhaltend** (via `bisect`): Für eine Influx-Messung wird immer die **nächste** passende SD-Position nach der zuletzt verankerten gewählt.
 
-3. **6-Stunden-Fitanker + Fenster (Windows):**  
-   - Pro Segment werden aus der Ankerliste **Fit-Anker** im 6-h-Raster gewählt (Start/Ende gepinnt, Auswahl `median|first|last` konfigurierbar).  
-   - Der Zeitraum wird in überlappende **Fenster** (z.B. 21 Tage, 48 h Überlapp) geteilt.  
-   - Pro Fenster wird (mit Mindestanzahl Anker) ein **linearer Zeit-Fit** bestimmt.
+3. **Gebinnte Median-Offset-Interpolation:**
+   - Die Anker werden in **6-Stunden-Bins** eingeteilt.
+   - Pro Bin: **Median** des Zeitoffsets `(t_abs_epoch − t_rel_s)`, korrigiert um `J/2` (Jitter-Mittelpunkt).
+   - Zwischen Bins: **lineare Interpolation** (`np.interp`), außerhalb: Extrapolation mit dem nächsten Randwert.
+   - Vorher: iteratives **Ausreißer-Trimming** (bis `MAX_TRIM_FRACTION` pro Iteration, `N_TRIM_ITER` Durchläufe).
 
-4. **Zeit-Fit mit Jitter-Constraints + Trimming:**  
-   Für Ankerpaare `(x_i = t_rel_s, T_i = t_abs_epoch)` wird
-   ```
-   tau_i = a + b * x_i
-   ```
-   bestimmt mit **Jitter-Korridor** (z. B. `J_MAX_SECONDS=8`):
-   ```
-   T_i − J ≤ tau_i ≤ T_i
-   ```
-   - Start mit least squares auf `T_i − J/2`,  
-   - Projektion auf den zulässigen Intervallraum,  
-   - mehrfache **Trimmung** der größten Verletzer (bis max. x % pro Iteration).  
-   - Kennzahlen pro Fit: RMSE (gegen Mitte), Jitter-Median/95 %, `b`→Drift (ppm).
+4. **Qualitätsbewertung:**
+   - RMSE gegen Jitter-Mitte (`T − J/2`), Jitter-Median/95. Perzentil, Drift in ppm.
+   - Flags: `good | medium | poor | no_abs_time`.
 
-5. **Fallbacks & Stitching:**  
-   - **Wenn zu wenig 6-h-Anker im Fenster:** Fit über **alle Anker** im Fenster (eigene Schwellwerte).  
-   - **Wenn gar keine Fenster passen:** segmentweiter Fit (ggf. über **alle Anker** des Segments).  
-   - **Abdeckung erweitern:** erste/letzte Fits können auf **gesamte Segmentbreite** ausgedehnt werden.  
-   - **Stitching:** Jeder SD-Punkt erhält den **nächstgelegenen** Fit (konfigurierbar, auch außerhalb des Fit-Fensters), um Lücken zu schließen.
-
-> **Warum kein Dynamic Time Warping?**  
-> DTW ist hier unnötig/ungünstig: Die SD-Reihenfolge ist **strikt** (Monotonie), und wir haben **exakte** Wertanker. Der lineare Fit mit Jitter-Constraints nutzt diese Struktur direkter, reproduzierbar und schneller.
+> **Warum kein Dynamic Time Warping?**
+> DTW ist hier unnötig: Die SD-Reihenfolge ist **strikt monoton**, und wir haben **exakte** Wertanker. Der lineare Fit mit Jitter-Korrektur nutzt diese Struktur direkter, reproduzierbar und schneller.
 
 ---
 
 ## Vorgehen & Quellen
 
-Die Entwicklung des Scripts erfolgte mit Hilfe von **ChatGTP 5 Thinking**.
+Die Entwicklung des Scripts erfolgte mit Hilfe von **ChatGPT** und **Claude**.
 
 Für die Entwicklung wurden folgende externen Unterlagen/Daten bereitgestellt und berücksichtigt:
-- **Datensheet Decentlab DL-SHT35:** <https://cdn.decentlab.com/download/datasheets/Decentlab-DL-SHT35-datasheet.pdf>  
-- **SD-Card User Guide (Decentlab):** <https://cdn.decentlab.com/download/manuals/SD-card-user-guide.pdf>  
-- **CSV-Rohdaten** des Geräts am **Sägistalsee** (SD-Karte)  
-- **Datenbank-Exporte** (Influx) des gleichen End-Nodes  
+- **Datensheet Decentlab DL-SHT35:** <https://cdn.decentlab.com/download/datasheets/Decentlab-DL-SHT35-datasheet.pdf>
+- **SD-Card User Guide (Decentlab):** <https://cdn.decentlab.com/download/manuals/SD-card-user-guide.pdf>
+- **CSV-Rohdaten** des Geräts am **Sägistalsee** (SD-Karte)
+- **Datenbank-Exporte** (Influx) des gleichen End-Nodes
 - **Tests** zusätzlich mit analogen Daten des End-Nodes **Hintergräppelen**
 
 ---
@@ -108,11 +91,12 @@ Für die Entwicklung wurden folgende externen Unterlagen/Daten bereitgestellt un
 ```
 .
 ├─ dl-sd-card-date.py       # Pipeline (Windows-tauglich)
-├─ dl-sd-card-date.yaml     # Konfiguration (optional; YAML, flach)
-├─ Input\                   # hier liegen alle CSV-Inputdateien
+├─ dl-sd-card-date.yaml     # Konfiguration (optional; YAML)
+├─ decentlab.py             # Decentlab-API-Client (MIT-Lizenz, Decentlab GmbH)
+├─ Input/                   # Inputdateien
 │  ├─ *_SDCard_raw_*.csv    # Files von der SD-Card des Gerätes
 │  └─ Sensors_Raw_*.csv     # Downloads via Grafana von der Influx-Datenbank
-└─ Output\                  # hier landen alle Resultatdateien
+└─ Output/                  # Resultatdateien
    ├─ SD_absolute.csv
    ├─ Segment_report.csv
    ├─ Anchors_report.csv
@@ -121,14 +105,17 @@ Für die Entwicklung wurden folgende externen Unterlagen/Daten bereitgestellt un
 
 ### Abhängigkeiten
 
-- Python **3.10+** (getestet mit 3.11)  
-- `pandas`, `numpy`  
-- **Optional:** `PyYAML` (YAML-Fallback ist eingebaut; nicht zwingend)
+- Python **3.10+** (getestet mit 3.11)
+- `pandas`, `numpy`
+- `requests` — nur für API-Modus (via `decentlab.py`)
+- **Optional:** `PyYAML` — der eingebaute YAML-Fallback-Parser unterstützt nur flache `key: value`-Strukturen; für die `columns:`-Konfiguration (Liste von Dicts) ist **PyYAML erforderlich**
 
 Installation:
 ```bash
 pip install pandas numpy
-# optional:
+# für API-Modus:
+pip install requests
+# für columns:-Konfiguration via YAML:
 pip install pyyaml
 ```
 
@@ -136,16 +123,63 @@ pip install pyyaml
 
 ## Ausführung
 
+### Betriebsmodi
+
+Das Script unterstützt drei Modi (in absteigender Priorität):
+
+**API-Modus** (empfohlen, wenn Decentlab-API verfügbar):
+```bash
+python dl-sd-card-date.py SD_Card.CSV --readout-date 2025-05-10
+```
+`decentlab.py` muss im selben Verzeichnis liegen. API-Zugangsdaten (`API_DOMAIN`, `API_KEY`, `DEVICE_ID`) werden aus der YAML-Konfiguration gelesen.
+
+**Offline-Modus** (Influx-CSV bereits heruntergeladen):
+```bash
+python dl-sd-card-date.py SD_Card.CSV --influx-dir Input/
+```
+
+**Legacy-Modus** (kein positionales Argument → `INPUT_DIR` aus Config):
+```bash
+python dl-sd-card-date.py --config my.yaml
+```
+
 ### 1) Dateien ablegen
 
-- **SD-Rohdaten** in `Input\` → `*_SDCard_raw_*.csv` (ohne Header).  
-- **Influx-Exporte** in `Input\` → `Sensors_Raw_*.csv` (mit Header).
+- **SD-Rohdaten:** `*_SDCard_raw_*.csv` (ohne Header) in `Input/` oder als Argument angeben.
+- **Influx-Exporte:** `Sensors_Raw_*.csv` (mit Header) in `Input/` oder via `--influx-dir`.
 
 ### 2) Konfiguration (optional)
 
-`dl-sd-card-date.yaml` (alle Werte sind optional; Defaults im Script):
+`dl-sd-card-date.yaml` (alle Werte optional; Defaults im Script):
 
 ```yaml
+# Decentlab-API (für API-Modus)
+# API_DOMAIN: "meinserver.decentlab.com"
+# API_KEY: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# DEVICE_ID: "19057"
+# DATABASE: "main"
+# READOUT_DATE: "2025-05-10"
+# TIME_MARGIN_DAYS: 1.0
+
+# Spalten-Definition (generisch, pro Gerät anpassen)
+# Erfordert PyYAML; ohne PyYAML gilt der Skript-Default (DL-SHT35)
+columns:
+  - sd_index: 1                              # 1-basierte Spaltennummer in SD-CSV
+    sensor: "sensirion-sht35-temperature"    # Influx-/API-Sensorname
+    conversion: "175 * x / 65535 - 45"      # Umrechnung Rohwert → Physikwert (Variable: x)
+    decimals: 10                             # Nachkommastellen für Quantisierung
+    label: "T_C"                             # Spaltenname in der Ausgabe
+  - sd_index: 2
+    sensor: "sensirion-sht35-humidity"
+    conversion: "100 * x / 65535"
+    decimals: 8
+    label: "RH_pct"
+  - sd_index: 3
+    sensor: "battery"
+    conversion: "x / 1000"
+    decimals: 3
+    label: "U_V"
+
 # Pfade (relativ zum Scriptordner oder absolut)
 INPUT_DIR: "Input"
 OUTPUT_DIR: "Output"
@@ -154,139 +188,119 @@ OUTPUT_DIR: "Output"
 SD_GLOB: "*_SDCard_raw_*.csv"
 INFLUX_GLOB: "Sensors_Raw_*.csv"
 
-# Quantisierung der Physik (ROUND_HALF_UP)
-TEMP_DECIMALS: 10
-RH_DECIMALS: 8
-BAT_DECIMALS: 3
-
-# Jitter-Korridor (s)
+# Jitter-Korridor (s) – laut Datenblatt: 0…8 s zufällige Verzögerung vor LoRa-TX
 J_MAX_SECONDS: 8.0
 
-# Matching
-MAX_SD_CANDIDATES: 50
+# Interpolation: Bin-Breite für Median-Offset-Glättung
+BIN_HOURS: 6.0
+MIN_ANCHORS_PER_BIN: 3
 
-# Fit / Trimming
+# Trimming: iteratives Entfernen von Ausreißern
 N_TRIM_ITER: 3
 MAX_TRIM_FRACTION: 0.02
-MIN_ANCHORS_FOR_FIT: 3
+MIN_ANCHORS_FOR_FIT: 30
 
-# Fensterung
-WINDOW_DAYS: 21.0
-WINDOW_OVERLAP_HOURS: 48.0
-MIN_ANCHORS_PER_WINDOW: 30
-MIN_ANCHORS_PER_WINDOW_ALL: 10
-
-# 6h Fit-Anker
-FIT_ANCHOR_GRID_HOURS: 6.0
-EDGE_ANCHOR_WINDOW_MIN: 60.0
-ANCHOR_PICK: "median"        # "median" | "first" | "last"
-
-# Fallbacks
-WINDOW_FALLBACK_SEGMENT_FIT: true
-MIN_ANCHORS_FOR_SEGMENT_FALLBACK: 30
-MIN_ANCHORS_FOR_SEGMENT_FALLBACK_ALL: 15
-MIN_FALLBACK_COVERAGE_FRAC: 0.5
-
-# Qualität
+# Qualitätsschwellen
+RMSE_GOOD_S: 12.0
+RMSE_MED_S: 20.0
 MIN_ANCHORS_GOOD: 20
 
-# Stitching (empfohlen für durchgehende Datierung)
-STITCH_WITHIN_ONLY: false     # false = nimm "nächstgelegenen" Fit, auch außerhalb des Fitfensters
-STITCH_PAD_S: 1000000000      # groß wählen, damit alle Punkte abgedeckt werden
-
-# Abdeckung erweitern
-FALLBACK_EXTEND_TO_SEGMENT_BOUNDS: true
-EXTEND_FITS_TO_SEGMENT_BOUNDS: true
-
-# Output-Dateinamen
+# Output-Dateinamen (unter OUTPUT_DIR)
 OUT_SD_ABSOLUTE: "SD_absolute.csv"
 OUT_SEGMENT_REPORT: "Segment_report.csv"
 OUT_ANCHOR_REPORT: "Anchors_report.csv"
 OUT_PLAUSIBILITY_REPORT: "Plausibility_report.csv"
 ```
 
-### 3) Start (Windows, PowerShell)
+### 3) Start
 
-Im Ordner des Scripts:
-```powershell
-# mit YAML neben dem Script
+```bash
+# API-Modus
+python dl-sd-card-date.py SD_Card.CSV --readout-date 2025-05-10
+
+# Offline-Modus
+python dl-sd-card-date.py SD_Card.CSV --influx-dir Input/
+
+# Legacy-Modus (PowerShell/Windows)
 python .\dl-sd-card-date.py --config .\dl-sd-card-date.yaml
 
-# oder Pfade explizit überschreiben:
-python .\dl-sd-card-date.py `
-  --input-dir "F:\Pfad\zu\Projekt\Input" `
-  --output-dir "F:\Pfad\zu\Projekt\Output" `
-  --config .\dl-sd-card-date.yaml
+# Ausgabeverzeichnis überschreiben
+python dl-sd-card-date.py SD_Card.CSV --influx-dir Input/ --output-dir /tmp/results
 ```
 
-Beim Start werden **INPUT_DIR/OUTPUT_DIR** geloggt und am Ende die **vollständigen Output-Pfade** ausgegeben.
+Beim Start werden INPUT-/OUTPUT-Pfade geloggt, am Ende die vollständigen Output-Pfade ausgegeben.
 
 ---
 
 ## Output-Dateien
 
-### `Output\SD_absolute.csv`
-Spalten (Auszug):
+### `Output/SD_absolute.csv`
+Spalten:
 - `segment_id`, `idx_sd_global`, `idx_in_segment`
 - `t_rel_s` – Sekunden seit letztem Reset (aus SD)
-- `t_abs_utc` – **berechneter UTC-Zeitstempel** (ISO 8601)
-- `T_C`, `RH_pct`, `U_V` – quantisierte Physik (10/8/3 Nachkommastellen)
+- `t_abs_utc` – **berechneter UTC-Zeitstempel** (ISO 8601, leer wenn kein Fit)
+- `T_C`, `RH_pct`, `U_V` – quantisierte Physikwerte (10/8/3 Nachkommastellen)
 - `quality_flag` – `good | medium | poor | no_abs_time`
 
-### `Output\Segment_report.csv`
+### `Output/Segment_report.csv`
 Pro Segment:
-- `n_points`, `n_windows`
+- `n_points`, `n_grid_points` (Anzahl Bin-Stützstellen im Fit)
 - `rmse_to_mid_s_median` – RMSE gegen mittlere Jitterlage (`T − J/2`)
 - `jitter_median_s_overall`, `jitter_p95_s_overall`
-- `drift_ppm_median` – `(b − 1) * 1e6`
+- `drift_ppm_median` – Drift der SD-Uhr in ppm
 - `quality_flag`, `notes`
 
-### `Output\Anchors_report.csv`
+### `Output/Anchors_report.csv`
 Alle Anker:
 - SD-Index, Influx-Zeit, Tripel (quantisiert), berechnetes `tau_abs_utc`, Jitter pro Anker.
 
-### `Output\Plausibility_report.csv`
-- Anzahl Influx/SD-Punkte, Anteil gematcht, Anzahl Influx-Tripel ohne SD-Gegenstück.
+### `Output/Plausibility_report.csv`
+- Anzahl Influx/SD-Punkte, Anteil gematchter Influx-Punkte, Anzahl Influx-Tripel ohne SD-Gegenstück.
 
 ---
 
 ## Qualität & Grenzen
 
 - **Qualitätsflag je Punkt** kommt vom zugeordneten Fit. Richtwerte:
-  - `good`: RMSE ≤ 12 s **und** ausreichend Fit-Anker,
+  - `good`: RMSE ≤ 12 s **und** ≥ 20 Anker,
   - `medium`: RMSE ≤ 20 s,
   - `poor`: sonst,
   - `no_abs_time`: kein Fit verfügbar (z. B. Segment ohne Anker).
-- **Initiale Segmente** (ganz zu Beginn) können leer bleiben, wenn keine Influx-Anker existieren. Ohne Anker wird **nicht spekuliert**.
+- **Initiale Segmente** können leer bleiben, wenn keine Influx-Anker existieren. Ohne Anker wird **nicht spekuliert**.
 - **Test-Mode** (viele Messungen in kurzer Zeit) braucht **keine** explizite Erkennung: das Matching ist ordnungserhaltend und der Fit nutzt die realen `t_rel_s`.
 
 ---
 
 ## Troubleshooting
 
-- **„Anchors total = 0“ / „Windows = 0“**  
-  - Passt die **Quantisierung** (10/8/3) zu deinen Influx-Werten?  
-  - Stimmen **Dateimuster** und liegen die Files in `Input\`?
-  - Schwellen lockern: `MIN_ANCHORS_PER_WINDOW`, `MIN_ANCHORS_PER_WINDOW_ALL`, `MIN_ANCHORS_FOR_SEGMENT_FALLBACK[_ALL]`.
-  - `WINDOW_DAYS` verkleinern, `WINDOW_OVERLAP_HOURS` erhöhen, `FIT_ANCHOR_GRID_HOURS` senken.
+- **„Anker gesamt = 0"**
+  - Passt die **Quantisierung** (`decimals` in `columns:`) zu deinen Influx-Werten?
+  - Stimmen **Dateimuster** (`SD_GLOB`, `INFLUX_GLOB`) und liegen die Files im richtigen Verzeichnis?
+  - Im API-Modus: Sind `API_DOMAIN`, `API_KEY`, `DEVICE_ID` und `READOUT_DATE` korrekt gesetzt?
 
-- **Lücken in `t_abs_utc`**  
-  - `STITCH_WITHIN_ONLY: false` und großes `STITCH_PAD_S` setzen → Punkte auch **außerhalb** eines Fit-Fensters dem **nächstgelegenen Fit** zuordnen.
+- **Lücken in `t_abs_utc`**
+  - Segment hat zu wenige Anker für einen Fit (< `MIN_ANCHORS_FOR_FIT`).
+  - `BIN_HOURS` verkleinern oder `MIN_ANCHORS_PER_BIN` reduzieren.
 
-- **YAML wird nicht gelesen / PyYAML fehlt**  
-  - Script hat **eingebauten YAML-Fallback** (flache `key: value`-Konfiguration). PyYAML ist **optional**.
+- **`columns:` aus YAML wird nicht übernommen**
+  - PyYAML ist nicht installiert; der eingebaute Fallback-Parser unterstützt keine verschachtelten Strukturen.
+  - Lösung: `pip install pyyaml`.
+
+- **PyYAML fehlt / YAML wird nicht gelesen**
+  - Script hat **eingebauten YAML-Fallback** für flache `key: value`-Konfiguration.
+  - Die `columns:`-Konfiguration erfordert PyYAML (s. o.).
 
 ---
 
 ## Performance-Hinweise
 
-- Große CSVs (10^5–10^6 Zeilen) brauchen Zeit/RAM.  
-- Kleinere `WINDOW_DAYS` und niedrigere Mindestanker pro Fenster können helfen.
+- Große CSVs (10⁵–10⁶ Zeilen) benötigen entsprechend RAM (typisch 1–4 GB).
+- `BIN_HOURS` erhöhen und `MIN_ANCHORS_PER_BIN` reduzieren, wenn zu wenige Bin-Stützstellen entstehen.
 
 ---
 
 ## Beitrag & Lizenz
 
-- Pull Requests willkommen (Tests, Profiling, neue Reports).  
-- Lizenz: tbd
-
+- Pull Requests willkommen (Tests, Profiling, neue Reports).
+- `decentlab.py`: MIT-Lizenz, Copyright 2016 Decentlab GmbH.
+- Lizenz des übrigen Codes: tbd

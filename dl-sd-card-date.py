@@ -155,8 +155,17 @@ def _load_yaml(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     try:
         import yaml
-        data = yaml.safe_load(text)
-    except Exception:
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError as e:
+            print(f"[WARN] YAML-Syntaxfehler in {path}: {e}", file=sys.stderr)
+            return {}
+    except ImportError:
+        # PyYAML nicht installiert → eingebauter Fallback (nur flache key: value)
+        if "columns:" in text:
+            print("[WARN] PyYAML nicht installiert: 'columns:'-Konfiguration aus YAML "
+                  "wird ignoriert (eingebauter Parser unterstützt keine verschachtelten "
+                  "Strukturen). Bitte 'pip install pyyaml' ausführen.", file=sys.stderr)
         data = _simple_yaml_load(text)
     return data if isinstance(data, dict) else {}
 
