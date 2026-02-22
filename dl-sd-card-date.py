@@ -740,12 +740,13 @@ def apply_time_mapping(sd_seg: pd.DataFrame, fit_result) -> Tuple[np.ndarray, np
 def make_outputs(sd_df: pd.DataFrame, t_abs_all: np.ndarray,
                  quality_all: np.ndarray, out_dir: Path) -> pd.DataFrame:
     """Schreibt SD_absolute.csv."""
-    t_abs_utc = []
-    for epoch in t_abs_all:
-        if np.isnan(epoch):
-            t_abs_utc.append("")
-        else:
-            t_abs_utc.append(pd.to_datetime(epoch, unit="s", utc=True).isoformat())
+    # Epoch → ISO-String vektorisiert (statt row-by-row pd.to_datetime-Aufruf)
+    valid_mask = ~np.isnan(t_abs_all)
+    t_abs_utc = np.empty(len(t_abs_all), dtype=object)
+    t_abs_utc[~valid_mask] = ""
+    if valid_mask.any():
+        ts = pd.to_datetime(t_abs_all[valid_mask], unit="s", utc=True)
+        t_abs_utc[valid_mask] = ts.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00").values
 
     data = {
         "segment_id": sd_df["segment_id"].values,
@@ -754,10 +755,12 @@ def make_outputs(sd_df: pd.DataFrame, t_abs_all: np.ndarray,
         "t_rel_s": np.round(sd_df["t_rel_s"].values, 3),
         "t_abs_utc": t_abs_utc,
     }
+    # Physikwerte vektorisiert formatieren (statt list-comprehension)
     for col_def in COLUMNS:
         vc = f"val_q_{col_def['sd_index']}"
-        data[col_def["label"]] = [_format_val(v, col_def["decimals"])
-                                  for v in sd_df[vc].values]
+        data[col_def["label"]] = np.char.mod(
+            f"%.{col_def['decimals']}f", sd_df[vc].values
+        )
     data["quality_flag"] = quality_all
 
     df_out = pd.DataFrame(data)
@@ -799,32 +802,52 @@ def make_segment_report(sd_df: pd.DataFrame, fit_results: Dict,
 def make_anchor_report(anchors_df: pd.DataFrame, fit_results: Dict,
                        out_dir: Path) -> pd.DataFrame:
     val_cols = [f"val_q_{c['sd_index']}" for c in COLUMNS]
-    rows = []
+
+    if anchors_df.empty:
+        df = pd.DataFrame(columns=[
+            "segment_id", "idx_sd_global", "idx_in_segment", "sd_t_rel_s",
+            "influx_ts_utc", "tau_abs_utc", "jitter_s",
+        ] + [c["label"] for c in COLUMNS])
+        df.to_csv(out_dir / OUT_ANCHOR_REPORT, index=False)
+        return df
+
+    # Pro Segment: tau und jitter vektorisiert berechnen (statt iterrows)
+    seg_parts = []
     for seg_id, group in anchors_df.groupby("segment_id"):
         fit = fit_results.get(seg_id)
-        for _, a in group.iterrows():
-            tau = None
-            jitter = None
-            if fit is not None:
-                tau_epoch = a["t_rel_s"] + np.interp(
-                    a["t_rel_s"], fit["x_grid"], fit["offset_grid"]
+        t_rel = group["t_rel_s"].values
+
+        if fit is not None:
+            tau_epochs = t_rel + np.interp(t_rel, fit["x_grid"], fit["offset_grid"])
+            tau_utc_strs = pd.to_datetime(
+                tau_epochs, unit="s", utc=True
+            ).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+            jitter_s = group["ts_epoch"].values - tau_epochs
+        else:
+            tau_utc_strs = np.full(len(group), "", dtype=object)
+            jitter_s = np.full(len(group), np.nan)
+
+        influx_ts_strs = pd.to_datetime(
+            group["ts_utc"], utc=True, errors="coerce"
+        ).dt.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00").fillna("")
+
+        part = pd.DataFrame({
+            "segment_id": seg_id,
+            "idx_sd_global": group["sd_global_idx"].values,
+            "idx_in_segment": group["idx_in_segment"].values,
+            "sd_t_rel_s": np.round(t_rel, 3),
+            "influx_ts_utc": influx_ts_strs.values,
+            "tau_abs_utc": tau_utc_strs,
+            "jitter_s": jitter_s,
+        })
+        for vc, col_def in zip(val_cols, COLUMNS):
+            if vc in group.columns:
+                part[col_def["label"]] = np.char.mod(
+                    f"%.{col_def['decimals']}f", group[vc].values
                 )
-                tau = pd.to_datetime(tau_epoch, unit="s", utc=True)
-                jitter = a["ts_epoch"] - tau_epoch
-            row = {
-                "segment_id": seg_id,
-                "idx_sd_global": a["sd_global_idx"],
-                "idx_in_segment": a["idx_in_segment"],
-                "sd_t_rel_s": round(a["t_rel_s"], 3),
-                "influx_ts_utc": pd.to_datetime(a["ts_utc"], utc=True).isoformat(),
-                "tau_abs_utc": tau.isoformat() if tau is not None else "",
-                "jitter_s": jitter,
-            }
-            for vc, col_def in zip(val_cols, COLUMNS):
-                if vc in a.index:
-                    row[col_def["label"]] = _format_val(a[vc], col_def["decimals"])
-            rows.append(row)
-    df = pd.DataFrame(rows)
+        seg_parts.append(part)
+
+    df = pd.concat(seg_parts, ignore_index=True)
     df.to_csv(out_dir / OUT_ANCHOR_REPORT, index=False)
     return df
 

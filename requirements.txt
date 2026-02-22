@@ -1,0 +1,14 @@
+# dl-sd-card-date — Abhängigkeiten
+# Installation: pip install -r requirements.txt
+#
+# Kernabhängigkeiten (immer benötigt):
+pandas>=1.3.0
+numpy>=1.21.0
+
+# API-Modus (nur benötigt wenn decentlab.py / --readout-date genutzt wird):
+requests>=2.26.0
+
+# YAML-Konfiguration mit columns:-Struktur (verschachtelte YAML-Listen):
+# Ohne PyYAML funktioniert der eingebaute Fallback-Parser nur für flache
+# key: value-Einträge; die columns:-Definition wird dann ignoriert.
+PyYAML>=5.4.1
