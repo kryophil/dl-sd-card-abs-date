@@ -82,6 +82,9 @@ def query(domain, api_key, time_filter='',
                              'q': q},
                      headers={'Authorization': 'Bearer {}'.format(api_key)})
 
+    if not r.ok:
+        raise ValueError("API-Fehler {}: {}".format(r.status_code, r.text))
+
     data = json.loads(r.text)
 
     if 'results' not in data or 'series' not in data['results'][0]:
