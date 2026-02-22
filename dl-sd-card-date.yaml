@@ -1,35 +1,62 @@
 
-# dl-sd-card-date.yaml — Konfiguration (Pfade relativ zum Scriptordner)
+# dl-sd-card-date.yaml — Konfiguration
+# ======================================
 
+# --- Decentlab-API (für automatischen Modus) ---
+# API_DOMAIN: "meinserver.decentlab.com"
+# API_KEY: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# DEVICE_ID: "19057"
+# DATABASE: "main"
+# READOUT_DATE: "2025-05-10"
+# TIME_MARGIN_DAYS: 1.0
+
+# --- Spalten-Definition (generisch, pro Gerät anpassen) ---
+# sd_index: 1-basierte Spaltennummer in der SD-CSV (nach t1024)
+# sensor:   Influx-/API-Sensorname
+# conversion: Formel zur Umrechnung von SD-Rohwert in Physikwert (Variable: x)
+# decimals: Nachkommastellen für Quantisierung (exaktes Matching)
+# label:    Spaltenname in der Ausgabe
+columns:
+  - sd_index: 1
+    sensor: "sensirion-sht35-temperature"
+    conversion: "175 * x / 65535 - 45"
+    decimals: 10
+    label: "T_C"
+  - sd_index: 2
+    sensor: "sensirion-sht35-humidity"
+    conversion: "100 * x / 65535"
+    decimals: 8
+    label: "RH_pct"
+  - sd_index: 3
+    sensor: "battery"
+    conversion: "x / 1000"
+    decimals: 3
+    label: "U_V"
+
+# --- Pfade (relativ zum Scriptordner) ---
 INPUT_DIR: "Input"
 OUTPUT_DIR: "Output"
-
 SD_GLOB: "*_SDCard_raw_*.csv"
 INFLUX_GLOB: "Sensors_Raw_*.csv"
 
-# Quantisierung — Nachkommastellen für exaktes Tripel-Matching
-TEMP_DECIMALS: 10
-RH_DECIMALS: 8
-BAT_DECIMALS: 3
-
-# Jitter (laut Datenblatt: 0…8 s zufällige Verzögerung vor LoRa-TX)
+# --- Jitter (laut Datenblatt: 0…8 s zufällige Verzögerung vor LoRa-TX) ---
 J_MAX_SECONDS: 8.0
 
-# Interpolation: Bin-Breite für Median-Offset-Glättung (Stunden)
+# --- Interpolation: Bin-Breite für Median-Offset-Glättung (Stunden) ---
 BIN_HOURS: 6.0
 MIN_ANCHORS_PER_BIN: 3
 
-# Trimming: iteratives Entfernen von Ausreißern
+# --- Trimming: iteratives Entfernen von Ausreißern ---
 N_TRIM_ITER: 3
 MAX_TRIM_FRACTION: 0.02
 MIN_ANCHORS_FOR_FIT: 30
 
-# Qualitätsschwellen
+# --- Qualitätsschwellen ---
 RMSE_GOOD_S: 12.0
 RMSE_MED_S: 20.0
 MIN_ANCHORS_GOOD: 20
 
-# Output-Dateinamen (unter OUTPUT_DIR)
+# --- Output-Dateinamen (unter OUTPUT_DIR) ---
 OUT_SD_ABSOLUTE: "SD_absolute.csv"
 OUT_SEGMENT_REPORT: "Segment_report.csv"
 OUT_ANCHOR_REPORT: "Anchors_report.csv"
