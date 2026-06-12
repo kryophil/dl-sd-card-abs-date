@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Lokale Konfiguration mit Credentials (nicht committen)
+dl-sd-card-date.local.yaml
