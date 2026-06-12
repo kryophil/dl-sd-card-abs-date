@@ -25,7 +25,7 @@ Konfig via YAML: dl-sd-card-date.yaml im selben Ordner (oder via --config)
 """
 
 from __future__ import annotations
-import sys, os, math, textwrap
+import sys, os, math, re, textwrap
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 from collections import defaultdict
@@ -112,11 +112,33 @@ def _parse_cli():
                         help="Auslesedatum der SD-Karte (ISO, z.B. 2025-05-10)")
     parser.add_argument("--influx-dir", default=None,
                         help="Verzeichnis mit Influx-CSV-Dateien (Offline-Modus)")
+    parser.add_argument("--multifile", default=None,
+                        help="Verzeichnis mit mehreren SD-Dateien (alle SD_GLOB werden "
+                             "verarbeitet; Auslesedatum je Datei aus dem Dateinamen)")
+    parser.add_argument("--split-by-year", action="store_true",
+                        help="SD_absolute pro Kalenderjahr (t_abs_utc) in separate "
+                             "Dateien schreiben (SD_absolute_<Jahr>.csv)")
     parser.add_argument("--config", default=None,
                         help="Pfad zur YAML-Konfigurationsdatei")
     parser.add_argument("--output-dir", default=None,
                         help="Ausgabeverzeichnis")
     return parser.parse_args()
+
+
+def _readout_date_from_name(path: Path) -> Optional[datetime]:
+    """Extrahiert das Auslesedatum aus dem Dateinamen.
+
+    Nimmt die letzte 8-stellige Zifferngruppe (YYYYMMDD), z.B.
+    'SGS_SDCard_raw_20250816.csv' → 2025-08-16,
+    'HIG_SDCard_raw_19057_20250510.CSV' → 2025-05-10.
+    """
+    matches = re.findall(r"\d{8}", path.stem)
+    if not matches:
+        return None
+    try:
+        return datetime.strptime(matches[-1], "%Y%m%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _simple_yaml_load(text: str) -> dict:
@@ -308,7 +330,17 @@ def read_sd_files_from_dir(in_dir: Path) -> pd.DataFrame:
     if not sd_files:
         print(f"[WARN] Keine SD-Dateien: {SD_GLOB} in {in_dir}", file=sys.stderr)
         return pd.DataFrame()
-    frames = [read_sd_file(p) for p in sd_files]
+    frames = []
+    seg_offset = 0
+    idx_offset = 0
+    for p in sd_files:
+        f = read_sd_file(p)
+        # Global eindeutige IDs über alle Dateien (sonst Kollision bei groupby)
+        f["segment_id"] = f["segment_id"] + seg_offset
+        f["global_idx"] = f["global_idx"] + idx_offset
+        seg_offset = int(f["segment_id"].max()) + 1
+        idx_offset = int(f["global_idx"].max()) + 1
+        frames.append(f)
     return pd.concat(frames, ignore_index=True)
 
 
@@ -736,9 +768,27 @@ def apply_time_mapping(sd_seg: pd.DataFrame, fit_result) -> Tuple[np.ndarray, np
 # Reports / Output
 # ====================
 
+def _write_sd_absolute_by_year(df_out: pd.DataFrame, out_dir: Path) -> List[str]:
+    """Schreibt SD_absolute pro Kalenderjahr (aus t_abs_utc) in separate Dateien.
+
+    Zeilen ohne absolute Zeit (leeres t_abs_utc) landen in
+    'SD_absolute_undatiert.csv'.
+    """
+    stem, ext = os.path.splitext(OUT_SD_ABSOLUTE)
+    years = df_out["t_abs_utc"].str.slice(0, 4)
+    written = []
+    for year, group in df_out.groupby(years):
+        suffix = "undatiert" if year == "" else year
+        name = f"{stem}_{suffix}{ext}"
+        group.to_csv(out_dir / name, index=False)
+        written.append(name)
+    return written
+
+
 def make_outputs(sd_df: pd.DataFrame, t_abs_all: np.ndarray,
-                 quality_all: np.ndarray, out_dir: Path) -> pd.DataFrame:
-    """Schreibt SD_absolute.csv."""
+                 quality_all: np.ndarray, out_dir: Path,
+                 split_by_year: bool = False) -> pd.DataFrame:
+    """Schreibt SD_absolute.csv (oder pro Jahr, wenn split_by_year)."""
     # Epoch → ISO-String vektorisiert (statt row-by-row pd.to_datetime-Aufruf)
     valid_mask = ~np.isnan(t_abs_all)
     t_abs_utc = np.empty(len(t_abs_all), dtype=object)
@@ -763,7 +813,10 @@ def make_outputs(sd_df: pd.DataFrame, t_abs_all: np.ndarray,
     data["quality_flag"] = quality_all
 
     df_out = pd.DataFrame(data)
-    df_out.to_csv(out_dir / OUT_SD_ABSOLUTE, index=False)
+    if split_by_year:
+        _write_sd_absolute_by_year(df_out, out_dir)
+    else:
+        df_out.to_csv(out_dir / OUT_SD_ABSOLUTE, index=False)
     return df_out
 
 
@@ -869,6 +922,138 @@ def make_plausibility_report(sd_df: pd.DataFrame, influx_df: pd.DataFrame,
 
 
 # ====================
+# Pipeline pro SD-Datensatz
+# ====================
+
+def process_segments(sd_df: pd.DataFrame, influx_df: pd.DataFrame):
+    """Matching + Zeitabbildung für einen SD-Datensatz gegen eine Referenz.
+
+    Returns: (anchors_df, fit_results, t_abs_all, quality_all)
+    t_abs_all/quality_all sind positionell zu sd_df ausgerichtet.
+    """
+    anchors_df = greedy_anchor_match(sd_df, influx_df)
+    print(f"[INFO] Anker gesamt: {len(anchors_df)}")
+
+    fit_results: Dict = {}
+    t_abs_all = np.full(len(sd_df), np.nan)
+    quality_all = np.array(["no_abs_time"] * len(sd_df), dtype=object)
+
+    for seg_id in sorted(sd_df["segment_id"].unique()):
+        seg_anchors = anchors_df[anchors_df["segment_id"] == seg_id]
+        seg_mask = (sd_df["segment_id"] == seg_id).values
+
+        print(f"[INFO] Segment {seg_id}: {int(seg_mask.sum())} Punkte, "
+              f"{len(seg_anchors)} Anker")
+
+        fit = fit_segment(seg_anchors, J_MAX_SECONDS)
+        fit_results[seg_id] = fit
+
+        t_abs_seg, quality_seg = apply_time_mapping(sd_df[seg_mask], fit)
+        t_abs_all[seg_mask] = t_abs_seg
+        quality_all[seg_mask] = quality_seg
+
+        if fit is not None:
+            print(f"         → {fit['quality']} (RMSE={fit['rmse']:.2f}s, "
+                  f"drift={fit['drift_ppm']:.1f}ppm, "
+                  f"grid={len(fit['x_grid'])} Stützstellen)")
+        else:
+            print(f"         → no_abs_time")
+
+    return anchors_df, fit_results, t_abs_all, quality_all
+
+
+def run_multifile(multi_dir: Path, out_dir: Path, influx_dir: Optional[str],
+                  split_by_year: bool):
+    """Verarbeitet alle SD-Dateien in einem Verzeichnis (je Datei eigenes
+    Auslesedatum aus dem Dateinamen) und schreibt vereinte Reports."""
+    sd_files = sorted(multi_dir.glob(SD_GLOB))
+    if not sd_files:
+        sd_files = sorted(multi_dir.glob(SD_GLOB.replace('.csv', '.CSV')))
+    if not sd_files:
+        sys.exit(f"[FEHLER] Keine SD-Dateien ({SD_GLOB}) in {multi_dir}")
+    print(f"[INFO] Multifile-Modus: {len(sd_files)} Datei(en) in {multi_dir}")
+
+    # Optionale gemeinsame Offline-Referenz (statt API)
+    shared_influx = None
+    if influx_dir:
+        idir = Path(influx_dir)
+        if not idir.is_absolute():
+            idir = Path.cwd() / idir
+        print(f"[INFO] Gemeinsame Influx-Referenz (offline): {idir}")
+        shared_influx = read_influx_from_dir(idir)
+    elif not (API_DOMAIN and API_KEY and DEVICE_ID):
+        sys.exit("[FEHLER] Multifile-API-Modus braucht API_DOMAIN, API_KEY und "
+                 "DEVICE_ID in der Config — oder --influx-dir für Offline-Referenz.")
+
+    seg_offset = 0
+    idx_offset = 0
+    sd_parts: List[pd.DataFrame] = []
+    influx_parts: List[pd.DataFrame] = []
+    anchor_parts: List[pd.DataFrame] = []
+    t_abs_chunks: List[np.ndarray] = []
+    quality_chunks: List[np.ndarray] = []
+    fit_results: Dict = {}
+
+    for f in sd_files:
+        print(f"\n[INFO] === Datei: {f.name} ===")
+        sd_df = read_sd_file(f)
+        # Global eindeutige IDs über alle Dateien
+        sd_df["segment_id"] = sd_df["segment_id"] + seg_offset
+        sd_df["global_idx"] = sd_df["global_idx"] + idx_offset
+        seg_offset = int(sd_df["segment_id"].max()) + 1
+        idx_offset = int(sd_df["global_idx"].max()) + 1
+
+        if shared_influx is not None:
+            influx_df = shared_influx
+        else:
+            readout = _readout_date_from_name(f)
+            if readout is None and READOUT_DATE:
+                readout = datetime.strptime(READOUT_DATE, "%Y-%m-%d").replace(
+                    tzinfo=timezone.utc)
+            if readout is None:
+                print(f"[WARN] Kein Auslesedatum aus '{f.name}' ableitbar und kein "
+                      f"READOUT_DATE gesetzt → Datei ohne absolute Zeit.",
+                      file=sys.stderr)
+                influx_df = pd.DataFrame()
+            else:
+                print(f"[INFO] Auslesedatum (aus Dateiname): {readout.date()}")
+                influx_df = query_api_for_segments(sd_df, readout)
+
+        if influx_df.empty:
+            anchors_df = greedy_anchor_match(sd_df, pd.DataFrame())
+            t_abs = np.full(len(sd_df), np.nan)
+            quality = np.array(["no_abs_time"] * len(sd_df), dtype=object)
+            fits = {seg: None for seg in sd_df["segment_id"].unique()}
+        else:
+            anchors_df, fits, t_abs, quality = process_segments(sd_df, influx_df)
+            influx_parts.append(influx_df)
+
+        sd_parts.append(sd_df)
+        anchor_parts.append(anchors_df)
+        t_abs_chunks.append(t_abs)
+        quality_chunks.append(quality)
+        fit_results.update(fits)
+
+    sd_all = pd.concat(sd_parts, ignore_index=True)
+    anchors_all = (pd.concat(anchor_parts, ignore_index=True)
+                   if any(len(a) for a in anchor_parts) else pd.DataFrame())
+    influx_all = (pd.concat(influx_parts, ignore_index=True)
+                  if influx_parts else pd.DataFrame())
+    t_abs_all = np.concatenate(t_abs_chunks)
+    quality_all = np.concatenate(quality_chunks)
+
+    print(f"\n[INFO] Gesamt: {len(sd_all)} SD-Punkte, "
+          f"{sd_all['segment_id'].nunique()} Segmente, {len(anchors_all)} Anker")
+    print(f"[INFO] OUTPUT_DIR: {out_dir}")
+
+    make_plausibility_report(sd_all, influx_all, anchors_all, out_dir)
+    make_outputs(sd_all, t_abs_all, quality_all, out_dir, split_by_year=split_by_year)
+    make_segment_report(sd_all, fit_results, out_dir)
+    make_anchor_report(anchors_all, fit_results, out_dir)
+    return out_dir
+
+
+# ====================
 # Main
 # ====================
 
@@ -887,6 +1072,18 @@ def main():
     if not out_dir.is_absolute():
         out_dir = (script_dir / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Multifile-Modus: ganzes Verzeichnis SD-Dateien verarbeiten ---
+    if args.multifile:
+        multi_dir = Path(args.multifile)
+        if not multi_dir.is_absolute():
+            multi_dir = Path.cwd() / multi_dir
+        if not multi_dir.is_dir():
+            sys.exit(f"[FEHLER] Multifile-Pfad ist kein Verzeichnis: {multi_dir}")
+        run_multifile(multi_dir, out_dir, args.influx_dir, args.split_by_year)
+        print("=== dl-sd-card-date v3 ===")
+        print(f"[INFO] Dateien geschrieben in: {out_dir}")
+        return
 
     # --- SD-Karte lesen ---
     if args.sd_file:
@@ -941,40 +1138,13 @@ def main():
     print(f"[INFO] Referenz-Punkte: {len(influx_df)}")
     print(f"[INFO] OUTPUT_DIR: {out_dir}")
 
-    # --- Matching ---
-    anchors_df = greedy_anchor_match(sd_df, influx_df)
-    print(f"[INFO] Anker gesamt: {len(anchors_df)}")
+    # --- Matching + Zeitabbildung pro Segment ---
+    anchors_df, fit_results, t_abs_all, quality_all = process_segments(sd_df, influx_df)
 
     make_plausibility_report(sd_df, influx_df, anchors_df, out_dir)
 
-    # --- Pro Segment: Zeitabbildung ---
-    fit_results: Dict = {}
-    t_abs_all = np.full(len(sd_df), np.nan)
-    quality_all = np.array(["no_abs_time"] * len(sd_df), dtype=object)
-
-    for seg_id in sorted(sd_df["segment_id"].unique()):
-        seg_anchors = anchors_df[anchors_df["segment_id"] == seg_id]
-        seg_mask = sd_df["segment_id"] == seg_id
-
-        print(f"[INFO] Segment {seg_id}: {seg_mask.sum()} Punkte, "
-              f"{len(seg_anchors)} Anker")
-
-        fit = fit_segment(seg_anchors, J_MAX_SECONDS)
-        fit_results[seg_id] = fit
-
-        t_abs_seg, quality_seg = apply_time_mapping(sd_df[seg_mask], fit)
-        t_abs_all[seg_mask] = t_abs_seg
-        quality_all[seg_mask] = quality_seg
-
-        if fit is not None:
-            print(f"         → {fit['quality']} (RMSE={fit['rmse']:.2f}s, "
-                  f"drift={fit['drift_ppm']:.1f}ppm, "
-                  f"grid={len(fit['x_grid'])} Stützstellen)")
-        else:
-            print(f"         → no_abs_time")
-
     # --- Output ---
-    make_outputs(sd_df, t_abs_all, quality_all, out_dir)
+    make_outputs(sd_df, t_abs_all, quality_all, out_dir, split_by_year=args.split_by_year)
     make_segment_report(sd_df, fit_results, out_dir)
     make_anchor_report(anchors_df, fit_results, out_dir)
 
