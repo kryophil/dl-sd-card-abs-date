@@ -150,6 +150,22 @@ python dl-sd-card-date.py --config my.yaml
 
 ### 2) Konfiguration (optional)
 
+#### Lokale Konfiguration mit Credentials (nicht committen)
+
+Das Script lädt automatisch `dl-sd-card-date.local.yaml` **vor** `dl-sd-card-date.yaml`, wenn
+die Datei vorhanden ist. Diese Datei ist in `.gitignore` eingetragen und eignet sich für
+API-Zugangsdaten, die nicht ins Repository gehören.
+
+Einmalig anlegen:
+```bash
+cp dl-sd-card-date.yaml dl-sd-card-date.local.yaml
+# Dann API_DOMAIN, API_KEY, DEVICE_ID in der .local.yaml eintragen
+```
+
+Ladereihenfolge: `--config`-Flag > `dl-sd-card-date.local.yaml` > `dl-sd-card-date.yaml`.
+
+---
+
 `dl-sd-card-date.yaml` (alle Werte optional; Defaults im Script):
 
 ```yaml
