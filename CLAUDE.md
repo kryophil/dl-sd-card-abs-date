@@ -65,7 +65,18 @@ python dl-sd-card-date.py --config my.yaml
 
 # Override output directory
 python dl-sd-card-date.py SD_Card.CSV --influx-dir Input/ --output-dir /tmp/out
+
+# Multifile mode: process every *_SDCard_raw_*.csv in a directory.
+# Each file is matched against the API using a readout date parsed from its
+# filename (last YYYYMMDD group); --split-by-year writes one SD_absolute_<year>.csv
+# per calendar year of t_abs_utc (undated rows → SD_absolute_undatiert.csv).
+python dl-sd-card-date.py --multifile Input/ --split-by-year
 ```
+
+Multifile assigns globally unique `segment_id`/`idx_sd_global` across files and
+writes combined reports. `--split-by-year` is orthogonal and works in any mode.
+`run_multifile()` / `process_segments()` factor the per-file pipeline; the
+single-file path in `main()` reuses `process_segments()`.
 
 Configuration precedence: CLI flags > YAML file > hardcoded defaults in script.
 

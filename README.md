@@ -143,20 +143,44 @@ python dl-sd-card-date.py SD_Card.CSV --influx-dir Input/
 python dl-sd-card-date.py --config my.yaml
 ```
 
+**Multifile-Modus** (mehrere SD-Dateien aus einem Verzeichnis):
+```bash
+# Alle *_SDCard_raw_*.csv aus dem Pfad, Referenz via API,
+# Auslesedatum je Datei aus dem Dateinamen, Output pro Jahr:
+python dl-sd-card-date.py --multifile Input/ --split-by-year
+```
+`--multifile PATH` verarbeitet **alle** Dateien, die auf `SD_GLOB`
+(`*_SDCard_raw_*.csv`) passen. Jede Datei wird einzeln gegen die **Decentlab-API**
+gematcht; das **Auslesedatum** wird aus der letzten `YYYYMMDD`-Gruppe im Dateinamen
+abgeleitet (z. B. `SGS_SDCard_raw_20250816.csv` → 2025-08-16). `segment_id` und
+`idx_sd_global` sind über alle Dateien hinweg eindeutig. Die Reports
+(`Segment_/Anchors_/Plausibility_report`) werden **vereint** geschrieben.
+
+Alternativ kann statt der API eine **gemeinsame Offline-Referenz** genutzt werden,
+indem zusätzlich `--influx-dir` angegeben wird:
+```bash
+python dl-sd-card-date.py --multifile Input/ --influx-dir Input/ --split-by-year
+```
+
+**Jahres-Aufteilung** (`--split-by-year`, in jedem Modus nutzbar):
+schreibt `SD_absolute_<Jahr>.csv` je Kalenderjahr von `t_abs_utc`
+(z. B. `SD_absolute_2024.csv`); Zeilen ohne absolute Zeit landen in
+`SD_absolute_undatiert.csv`. Ohne das Flag wird wie bisher ein einzelnes
+`SD_absolute.csv` geschrieben.
+
 ### Modus-Übersicht: Welche Parameter sind wann relevant?
 
-| Parameter / Quelle | API-Modus | Offline-Modus (`--influx-dir`) | Legacy-Modus |
-|---|---|---|---|
-| `API_DOMAIN`, `API_KEY`, `DEVICE_ID` | **erforderlich** | ignoriert | ignoriert |
-| `READOUT_DATE` | **erforderlich** | ignoriert | ignoriert |
-| `TIME_MARGIN_DAYS` | aktiv | ignoriert | ignoriert |
-| `--influx-dir` | — | **erforderlich** | — |
-| `INPUT_DIR` | — | — | aktiv (SD + Influx) |
-| Influx-CSV-Zeitraum | beliebig (API liefert) | muss SD-Zeitraum abdecken | muss SD-Zeitraum abdecken |
+| Parameter / Quelle | API-Modus | Offline-Modus (`--influx-dir`) | Multifile-Modus (`--multifile`) | Legacy-Modus |
+|---|---|---|---|---|
+| `API_DOMAIN`, `API_KEY`, `DEVICE_ID` | **erforderlich** | ignoriert | **erforderlich** (ohne `--influx-dir`) | ignoriert |
+| `READOUT_DATE` | **erforderlich** | ignoriert | aus Dateinamen (`YYYYMMDD`) | ignoriert |
+| `TIME_MARGIN_DAYS` | aktiv | ignoriert | aktiv (API-Variante) | ignoriert |
+| `--influx-dir` | — | **erforderlich** | optional (statt API) | — |
+| `INPUT_DIR` | — | — | — | aktiv (SD + Influx) |
+| Influx-CSV-Zeitraum | beliebig (API liefert) | muss SD-Zeitraum abdecken | beliebig / muss abdecken | muss SD-Zeitraum abdecken |
 
 > **Hinweis Multifile / mehrere Auslesezeitpunkte:**  
-> Im Offline-Modus können Influx-CSVs beliebige Zeiträume abdecken — das Script matched, was in beiden Quellen vorliegt.  
-> Im API-Modus gibt es nur ein einziges `READOUT_DATE`. Die Zeitfenster für alle Segmente werden rückwärts von diesem Datum berechnet, unter der Annahme, dass die Segmente zeitlich direkt aneinanderliegen. Bei mehreren SD-Dateien mit unterschiedlichen tatsächlichen Auslesezeitpunkten stößt der API-Modus konzeptionell an Grenzen — in diesem Fall ist der Offline-Modus die robustere Wahl.
+> Im einfachen API-Modus gibt es nur ein `READOUT_DATE` — bei mehreren SD-Dateien mit unterschiedlichen Auslesezeitpunkten ist `--multifile` die richtige Wahl: das Datum wird automatisch aus dem Dateinamen abgeleitet. Im Offline-Modus (`--influx-dir`) entfällt das Problem ganz, da die Zeitachse aus den CSV-Zeitstempeln kommt.
 
 ### 1) Dateien ablegen
 
@@ -265,7 +289,7 @@ Beim Start werden INPUT-/OUTPUT-Pfade geloggt, am Ende die vollständigen Output
 
 ## Output-Dateien
 
-### `Output/SD_absolute.csv`
+### `Output/SD_absolute.csv` (bzw. `SD_absolute_<Jahr>.csv` mit `--split-by-year`)
 Spalten:
 - `segment_id`, `idx_sd_global`, `idx_in_segment`
 - `t_rel_s` – Sekunden seit letztem Reset (aus SD)
