@@ -10,9 +10,10 @@ Primary documentation (README.md) is written in **German**.
 
 ```
 dl-sd-card-abs-date/
-├── dl-sd-card-date.py          # Main script (~960 lines, single-file application)
+├── dl-sd-card-date.py          # Main script (~990 lines, single-file application)
 ├── dl-sd-card-date.yaml        # YAML configuration (all tunable parameters)
 ├── decentlab.py                # Decentlab API client (MIT License, Decentlab GmbH 2016)
+├── requirements.txt            # Dependency pins (pandas, numpy, requests, PyYAML)
 ├── README.md                   # Comprehensive documentation (German)
 ├── .gitignore                  # Standard Python gitignore
 ├── Input/                      # Input data directory
@@ -36,6 +37,10 @@ dl-sd-card-abs-date/
 
 Install dependencies:
 ```bash
+# All dependencies at once (includes optional requests + PyYAML):
+pip install -r requirements.txt
+
+# Or selectively:
 pip install pandas numpy
 # For API mode:
 pip install requests
@@ -43,7 +48,8 @@ pip install requests
 pip install pyyaml
 ```
 
-No `requirements.txt`, `setup.py`, or `pyproject.toml` exists. This is a single-file script, not a package.
+A `requirements.txt` (dependency pins with comments) exists. No `setup.py` or
+`pyproject.toml` exists — this is a single-file script, not a package.
 
 ## Running the Script
 
