@@ -143,6 +143,31 @@ python dl-sd-card-date.py SD_Card.CSV --influx-dir Input/
 python dl-sd-card-date.py --config my.yaml
 ```
 
+**Multifile-Modus** (mehrere SD-Dateien aus einem Verzeichnis):
+```bash
+# Alle *_SDCard_raw_*.csv aus dem Pfad, Referenz via API,
+# Auslesedatum je Datei aus dem Dateinamen, Output pro Jahr:
+python dl-sd-card-date.py --multifile Input/ --split-by-year
+```
+`--multifile PATH` verarbeitet **alle** Dateien, die auf `SD_GLOB`
+(`*_SDCard_raw_*.csv`) passen. Jede Datei wird einzeln gegen die **Decentlab-API**
+gematcht; das **Auslesedatum** wird aus der letzten `YYYYMMDD`-Gruppe im Dateinamen
+abgeleitet (z. B. `SGS_SDCard_raw_20250816.csv` → 2025-08-16). `segment_id` und
+`idx_sd_global` sind über alle Dateien hinweg eindeutig. Die Reports
+(`Segment_/Anchors_/Plausibility_report`) werden **vereint** geschrieben.
+
+Alternativ kann statt der API eine **gemeinsame Offline-Referenz** genutzt werden,
+indem zusätzlich `--influx-dir` angegeben wird:
+```bash
+python dl-sd-card-date.py --multifile Input/ --influx-dir Input/ --split-by-year
+```
+
+**Jahres-Aufteilung** (`--split-by-year`, in jedem Modus nutzbar):
+schreibt `SD_absolute_<Jahr>.csv` je Kalenderjahr von `t_abs_utc`
+(z. B. `SD_absolute_2024.csv`); Zeilen ohne absolute Zeit landen in
+`SD_absolute_undatiert.csv`. Ohne das Flag wird wie bisher ein einzelnes
+`SD_absolute.csv` geschrieben.
+
 ### 1) Dateien ablegen
 
 - **SD-Rohdaten:** `*_SDCard_raw_*.csv` (ohne Header) in `Input/` oder als Argument angeben.
@@ -250,7 +275,7 @@ Beim Start werden INPUT-/OUTPUT-Pfade geloggt, am Ende die vollständigen Output
 
 ## Output-Dateien
 
-### `Output/SD_absolute.csv`
+### `Output/SD_absolute.csv` (bzw. `SD_absolute_<Jahr>.csv` mit `--split-by-year`)
 Spalten:
 - `segment_id`, `idx_sd_global`, `idx_in_segment`
 - `t_rel_s` – Sekunden seit letztem Reset (aus SD)
