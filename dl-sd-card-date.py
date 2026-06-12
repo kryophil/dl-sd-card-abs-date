@@ -361,7 +361,6 @@ def read_influx_files(influx_paths: List[Path]) -> pd.DataFrame:
         influx_col = col_map[col_def["sensor"]]
         vals = df[influx_col].astype(float).values
         q = _round_half_up(vals, col_def["decimals"])
-        col_name = f"val_q_{col_def['sd_index']}"
         q_arrays.append(q)
         dec_list.append(col_def["decimals"])
 
