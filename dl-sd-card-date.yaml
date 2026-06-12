@@ -7,8 +7,8 @@
 # API_KEY: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 # DEVICE_ID: "19057"
 # DATABASE: "main"
-# READOUT_DATE: "2025-05-10"
-# TIME_MARGIN_DAYS: 1.0
+# READOUT_DATE: "2026-06-11"    # Nur API-Modus: Auslesedatum der SD-Karte (Ende des letzten Segments)
+# TIME_MARGIN_DAYS: 1.0         # Nur API-Modus: Sicherheitsreserve für API-Zeitfenster (Tage)
 
 # --- Spalten-Definition (generisch, pro Gerät anpassen) ---
 # sd_index: 1-basierte Spaltennummer in der SD-CSV (nach t1024)

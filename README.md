@@ -168,6 +168,20 @@ schreibt `SD_absolute_<Jahr>.csv` je Kalenderjahr von `t_abs_utc`
 `SD_absolute_undatiert.csv`. Ohne das Flag wird wie bisher ein einzelnes
 `SD_absolute.csv` geschrieben.
 
+### Modus-Übersicht: Welche Parameter sind wann relevant?
+
+| Parameter / Quelle | API-Modus | Offline-Modus (`--influx-dir`) | Multifile-Modus (`--multifile`) | Legacy-Modus |
+|---|---|---|---|---|
+| `API_DOMAIN`, `API_KEY`, `DEVICE_ID` | **erforderlich** | ignoriert | **erforderlich** (ohne `--influx-dir`) | ignoriert |
+| `READOUT_DATE` | **erforderlich** | ignoriert | aus Dateinamen (`YYYYMMDD`) | ignoriert |
+| `TIME_MARGIN_DAYS` | aktiv | ignoriert | aktiv (API-Variante) | ignoriert |
+| `--influx-dir` | — | **erforderlich** | optional (statt API) | — |
+| `INPUT_DIR` | — | — | — | aktiv (SD + Influx) |
+| Influx-CSV-Zeitraum | beliebig (API liefert) | muss SD-Zeitraum abdecken | beliebig / muss abdecken | muss SD-Zeitraum abdecken |
+
+> **Hinweis Multifile / mehrere Auslesezeitpunkte:**  
+> Im einfachen API-Modus gibt es nur ein `READOUT_DATE` — bei mehreren SD-Dateien mit unterschiedlichen Auslesezeitpunkten ist `--multifile` die richtige Wahl: das Datum wird automatisch aus dem Dateinamen abgeleitet. Im Offline-Modus (`--influx-dir`) entfällt das Problem ganz, da die Zeitachse aus den CSV-Zeitstempeln kommt.
+
 ### 1) Dateien ablegen
 
 - **SD-Rohdaten:** `*_SDCard_raw_*.csv` (ohne Header) in `Input/` oder als Argument angeben.
