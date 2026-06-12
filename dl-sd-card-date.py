@@ -174,8 +174,11 @@ def _apply_config(config_path: Optional[str]):
     """Lädt Config und setzt globale Variablen."""
     if not config_path:
         script_dir = Path(os.path.abspath(os.path.dirname(__file__)))
+        local_yaml = script_dir / "dl-sd-card-date.local.yaml"
         default_yaml = script_dir / "dl-sd-card-date.yaml"
-        if default_yaml.exists():
+        if local_yaml.exists():
+            config_path = str(local_yaml)
+        elif default_yaml.exists():
             config_path = str(default_yaml)
         else:
             return
