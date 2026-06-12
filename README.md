@@ -143,6 +143,21 @@ python dl-sd-card-date.py SD_Card.CSV --influx-dir Input/
 python dl-sd-card-date.py --config my.yaml
 ```
 
+### Modus-Übersicht: Welche Parameter sind wann relevant?
+
+| Parameter / Quelle | API-Modus | Offline-Modus (`--influx-dir`) | Legacy-Modus |
+|---|---|---|---|
+| `API_DOMAIN`, `API_KEY`, `DEVICE_ID` | **erforderlich** | ignoriert | ignoriert |
+| `READOUT_DATE` | **erforderlich** | ignoriert | ignoriert |
+| `TIME_MARGIN_DAYS` | aktiv | ignoriert | ignoriert |
+| `--influx-dir` | — | **erforderlich** | — |
+| `INPUT_DIR` | — | — | aktiv (SD + Influx) |
+| Influx-CSV-Zeitraum | beliebig (API liefert) | muss SD-Zeitraum abdecken | muss SD-Zeitraum abdecken |
+
+> **Hinweis Multifile / mehrere Auslesezeitpunkte:**  
+> Im Offline-Modus können Influx-CSVs beliebige Zeiträume abdecken — das Script matched, was in beiden Quellen vorliegt.  
+> Im API-Modus gibt es nur ein einziges `READOUT_DATE`. Die Zeitfenster für alle Segmente werden rückwärts von diesem Datum berechnet, unter der Annahme, dass die Segmente zeitlich direkt aneinanderliegen. Bei mehreren SD-Dateien mit unterschiedlichen tatsächlichen Auslesezeitpunkten stößt der API-Modus konzeptionell an Grenzen — in diesem Fall ist der Offline-Modus die robustere Wahl.
+
 ### 1) Dateien ablegen
 
 - **SD-Rohdaten:** `*_SDCard_raw_*.csv` (ohne Header) in `Input/` oder als Argument angeben.
