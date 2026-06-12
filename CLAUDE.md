@@ -99,6 +99,8 @@ No linting or formatting tools are configured. The `.gitignore` references `.ruf
 
 ## Configuration Parameters (dl-sd-card-date.yaml)
 
+**Local override:** `dl-sd-card-date.local.yaml` (gitignored) is loaded before `dl-sd-card-date.yaml` when present. Use it for credentials that must not be committed. Load order: `--config` flag > `.local.yaml` > `.yaml`.
+
 Key parameter groups:
 | Group | Examples | Purpose |
 |-------|----------|---------|
@@ -145,3 +147,4 @@ Timestamp, Timezone Offset, <device>.battery, <device>.sensirion-sht35-humidity,
 - The `Input/` directory contains real sensor data used for validation — do not modify or delete
 - Windows path compatibility (backslash handling) is intentionally maintained
 - `decentlab.py` is an external MIT-licensed file from Decentlab GmbH — prefer minimal modifications
+- `dl-sd-card-date.local.yaml` is gitignored and must never be created or written by AI assistants — it is for user credentials only
