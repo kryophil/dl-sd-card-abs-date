@@ -499,7 +499,7 @@ def query_api_for_segments(sd_df: pd.DataFrame, readout_date: datetime
     all_frames = []
     for seg_id, start, end in windows:
         tf = _influxql_time_filter(start, end)
-        print(f"[API]  Segment {seg_id}: {start.isoformat()} → {end.isoformat()}")
+        print(f"[API]  Segment {seg_id}: {start.isoformat()} -> {end.isoformat()}")
         try:
             api_df = decentlab.query(
                 domain=API_DOMAIN,
@@ -522,7 +522,7 @@ def query_api_for_segments(sd_df: pd.DataFrame, readout_date: datetime
             continue
 
         all_frames.append(api_df)
-        print(f"[API]  → {len(api_df)} Datenpunkte empfangen")
+        print(f"[API]  -> {len(api_df)} Datenpunkte empfangen")
 
     if not all_frames:
         return pd.DataFrame()
@@ -870,7 +870,7 @@ def make_anchor_report(anchors_df: pd.DataFrame, fit_results: Dict,
     seg_parts = []
     for seg_id, group in anchors_df.groupby("segment_id"):
         fit = fit_results.get(seg_id)
-        t_rel = group["t_rel_s"].values
+        t_rel = group["t_rel_s"].values.astype(np.float64)
 
         if fit is not None:
             tau_epochs = t_rel + np.interp(t_rel, fit["x_grid"], fit["offset_grid"])
@@ -956,11 +956,11 @@ def process_segments(sd_df: pd.DataFrame, influx_df: pd.DataFrame):
         quality_all[seg_mask] = quality_seg
 
         if fit is not None:
-            print(f"         → {fit['quality']} (RMSE={fit['rmse']:.2f}s, "
+            print(f"         -> {fit['quality']} (RMSE={fit['rmse']:.2f}s, "
                   f"drift={fit['drift_ppm']:.1f}ppm, "
                   f"grid={len(fit['x_grid'])} Stützstellen)")
         else:
-            print(f"         → no_abs_time")
+            print(f"         -> no_abs_time")
 
     return anchors_df, fit_results, t_abs_all, quality_all
 
