@@ -155,7 +155,7 @@ Timestamp, Timezone Offset, <device>.battery, <device>.sensirion-sht35-humidity,
 - `_simple_yaml_load` (the built-in YAML fallback) **cannot parse nested structures** like the `columns:` list — this is intentional (PyYAML is required for that feature)
 - Do not add packaging infrastructure (setup.py, pyproject.toml) unless explicitly requested
 - Preserve German comments and documentation language unless asked to translate
-- The `Input/` directory contains real sensor data used for validation — do not modify or delete
+- The `Input/` directory contains versioned demo/validation data (HIG and Sensors_Raw files). Own test data can simply be placed in `Input/` — the `.gitignore` whitelist ensures only the explicitly listed demo files are tracked; everything else is ignored automatically.
 - Windows path compatibility (backslash handling) is intentionally maintained
 - `decentlab.py` is an external MIT-licensed file from Decentlab GmbH — prefer minimal modifications
 - `dl-sd-card-date.local.yaml` is gitignored and must never be created or written by AI assistants — it is for user credentials only

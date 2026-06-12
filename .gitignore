@@ -208,3 +208,11 @@ __marimo__/
 
 # Lokale Konfiguration mit Credentials (nicht committen)
 dl-sd-card-date.local.yaml
+
+# --- Input/-Verzeichnis: Demo-Daten committed, alles andere lokal ---
+# Pattern: alles ignorieren, dann committete Demo-/Validierungsdateien explizit whitelisten.
+Input/*
+!Input/HIG_SDCard_raw_19057_20250510.CSV
+!Input/Sensors_Raw_19057_20231109090000-20231231235959.csv
+!Input/Sensors_Raw_19057_20240101000000-20241231235959.csv
+!Input/Sensors_Raw_19057_20250101000000-20250831235959.csv
