@@ -1,0 +1,9 @@
+# LF-only line endings for all text files, in repo and in working tree.
+# Prevents platform-dependent diffs (Windows/macOS/Linux) and ensures
+# Output/ baselines are byte-for-byte comparable across environments.
+* text=auto eol=lf
+
+# Explicit binary markers (defensive, for future additions)
+*.png binary
+*.jpg binary
+*.pdf binary
