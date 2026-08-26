@@ -986,7 +986,10 @@ def run_multifile(multi_dir: Path, out_dir: Path, influx_dir: Optional[str],
         if not idir.is_absolute():
             idir = Path.cwd() / idir
         print(f"[INFO] Gemeinsame Influx-Referenz (offline): {idir}")
-        shared_influx = read_influx_from_dir(idir)
+        try:
+            shared_influx = read_influx_from_dir(idir)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError) as e:
+            sys.exit(f"[FEHLER] Konnte Influx-Referenz aus '{idir}' nicht lesen: {e}")
     elif not (API_DOMAIN and API_KEY and DEVICE_ID):
         sys.exit("[FEHLER] Multifile-API-Modus braucht API_DOMAIN, API_KEY und "
                  "DEVICE_ID in der Config — oder --influx-dir für Offline-Referenz.")
@@ -1002,7 +1005,10 @@ def run_multifile(multi_dir: Path, out_dir: Path, influx_dir: Optional[str],
 
     for f in sd_files:
         print(f"\n[INFO] === Datei: {f.name} ===")
-        sd_df = read_sd_file(f)
+        try:
+            sd_df = read_sd_file(f)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError) as e:
+            sys.exit(f"[FEHLER] Konnte SD-Datei '{f.name}' nicht lesen (Multifile-Iteration): {e}")
         # Global eindeutige IDs über alle Dateien
         sd_df["segment_id"] = sd_df["segment_id"] + seg_offset
         sd_df["global_idx"] = sd_df["global_idx"] + idx_offset
@@ -1099,14 +1105,20 @@ def main():
         if not sd_path.exists():
             sys.exit(f"[FEHLER] SD-Datei nicht gefunden: {sd_path}")
         print(f"[INFO] SD-Datei: {sd_path}")
-        sd_df = read_sd_file(sd_path)
+        try:
+            sd_df = read_sd_file(sd_path)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError) as e:
+            sys.exit(f"[FEHLER] Konnte SD-Datei '{sd_path}' nicht lesen: {e}")
     else:
         # Legacy-Modus: INPUT_DIR
         in_dir = Path(INPUT_DIR)
         if not in_dir.is_absolute():
             in_dir = (script_dir / in_dir).resolve()
         print(f"[INFO] INPUT_DIR: {in_dir}")
-        sd_df = read_sd_files_from_dir(in_dir)
+        try:
+            sd_df = read_sd_files_from_dir(in_dir)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError) as e:
+            sys.exit(f"[FEHLER] Konnte SD-Dateien aus INPUT_DIR '{in_dir}' nicht lesen: {e}")
 
     if sd_df.empty:
         sys.exit("[FEHLER] Keine SD-Daten geladen.")
@@ -1123,7 +1135,10 @@ def main():
         if not influx_dir.is_absolute():
             influx_dir = Path.cwd() / influx_dir
         print(f"[INFO] Influx-Verzeichnis (offline): {influx_dir}")
-        influx_df = read_influx_from_dir(influx_dir)
+        try:
+            influx_df = read_influx_from_dir(influx_dir)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError) as e:
+            sys.exit(f"[FEHLER] Konnte Influx-CSV aus '{influx_dir}' nicht lesen: {e}")
     elif READOUT_DATE and API_DOMAIN and API_KEY and DEVICE_ID:
         # API-Modus
         readout_dt = datetime.strptime(READOUT_DATE, "%Y-%m-%d").replace(
@@ -1136,7 +1151,10 @@ def main():
         in_dir = Path(INPUT_DIR)
         if not in_dir.is_absolute():
             in_dir = (script_dir / in_dir).resolve()
-        influx_df = read_influx_from_dir(in_dir)
+        try:
+            influx_df = read_influx_from_dir(in_dir)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, ValueError) as e:
+            sys.exit(f"[FEHLER] Konnte Influx-Dateien aus INPUT_DIR '{in_dir}' nicht lesen: {e}")
 
     if influx_df.empty:
         sys.exit("[FEHLER] Keine Referenzdaten (Influx/API) geladen.")
