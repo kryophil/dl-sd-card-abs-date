@@ -125,7 +125,15 @@ pip install pyyaml
 
 ### Betriebsmodi
 
-Das Script unterstützt drei Modi (in absteigender Priorität):
+**Wie das Skript die Datenquellen wählt:** Übergeordnet entscheidet `--multifile PATH`
+— gesetzt, aktiviert es den Multifile-Modus, der die Einzeldatei-Logik pro Datei
+umhüllt (siehe unten). Ohne `--multifile` bestimmen zwei unabhängige Weichen in
+`main()` das Verhalten: die **SD-Quelle** (positionales Argument `sd_file`, sonst
+`INPUT_DIR`-Fallback) und die **Influx-Quelle** (`--influx-dir` falls gesetzt, sonst
+API falls `READOUT_DATE`/`API_DOMAIN`/`API_KEY`/`DEVICE_ID` vollständig konfiguriert
+sind, sonst `INPUT_DIR`-Fallback). Die folgende Aufzählung zeigt die übliche
+Kombination dieser Weichen — keine exklusive Prioritätsliste: `--influx-dir` ist
+z. B. auch ohne positionales `sd_file` gültig.
 
 **API-Modus** (empfohlen, wenn Decentlab-API verfügbar):
 ```bash
