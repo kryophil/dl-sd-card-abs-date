@@ -209,10 +209,24 @@ __marimo__/
 # Lokale Konfiguration mit Credentials (nicht committen)
 dl-sd-card-date.local.yaml
 
-# --- Input/-Verzeichnis: Demo-Daten committed, alles andere lokal ---
-# Pattern: alles ignorieren, dann committete Demo-/Validierungsdateien explizit whitelisten.
+# --- Input/-Verzeichnis: Demo-Fall committen, alles weitere lokal ---
+# Der Demo-Fall ist "ein SD-Auslesestand plus zugehörige Influx-Referenzen"
+# für Device 19057 (Node Hintergräppelen). Weitere lokale SD-Files oder
+# Influx-Referenzen bleiben lokal.
 Input/*
 !Input/HIG_SDCard_raw_19057_20250510.CSV
 !Input/Sensors_Raw_19057_20231109090000-20231231235959.csv
 !Input/Sensors_Raw_19057_20240101000000-20241231235959.csv
 !Input/Sensors_Raw_19057_20250101000000-20250831235959.csv
+
+# --- Output/-Verzeichnis: Baseline aus dem Demo-Fall committen ---
+# Die vier committeten Files sind die Referenz-Outputs eines
+# Standard-Laufs (Offline-Modus, ohne --split-by-year) über den
+# Input-Demo-Fall. Sie werden bei substanziellen Algorithmen-Änderungen
+# regeneriert und mitgeschoben. Alles andere (Jahres-Splits,
+# Testartefakte, lokale Läufe mit anderen Inputs) bleibt lokal.
+Output/*
+!Output/SD_absolute.csv
+!Output/Segment_report.csv
+!Output/Anchors_report.csv
+!Output/Plausibility_report.csv
