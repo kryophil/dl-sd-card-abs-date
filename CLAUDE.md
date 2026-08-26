@@ -10,7 +10,7 @@ Primary documentation (README.md) is written in **German**.
 
 ```
 dl-sd-card-abs-date/
-├── dl-sd-card-date.py          # Main script (~990 lines, single-file application)
+├── dl-sd-card-date.py          # Main script (~1200 lines, single-file application)
 ├── dl-sd-card-date.yaml        # YAML configuration (all tunable parameters)
 ├── decentlab.py                # Decentlab API client (MIT License, Decentlab GmbH 2016)
 ├── requirements.txt            # Dependency pins (pandas, numpy, requests, PyYAML)
