@@ -227,8 +227,9 @@ def _apply_config(config_path: Optional[str]):
         if val is not None:
             try:
                 globals()[name] = cast(val)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Config-Wert '{name}={val!r}' konnte nicht als "
+                      f"{cast.__name__} interpretiert werden: {e}", file=sys.stderr)
 
     # Spalten-Definition (Liste von Dicts)
     cols_raw = data.get("columns", data.get("COLUMNS"))
