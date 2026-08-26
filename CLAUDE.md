@@ -26,6 +26,10 @@ dl-sd-card-abs-date/
     └── Plausibility_report.csv # Data consistency checks
 ```
 
+`Input/`/`Output/` are gitignore-whitelisted to exactly the files above — a single
+committed demo case (device 19057, node Hintergräppelen), not a growing archive.
+See README.md "Demo-Fall in `Input/` und `Output/`" for details.
+
 ## Tech Stack & Dependencies
 
 - **Python 3.10+** (tested with 3.11)

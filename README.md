@@ -103,6 +103,19 @@ Für die Entwicklung wurden folgende externen Unterlagen/Daten bereitgestellt un
    └─ Plausibility_report.csv
 ```
 
+### Demo-Fall in `Input/` und `Output/`
+
+`Input/` enthält einen committeten Demo-Fall: ein SD-Auslesestand
+(`HIG_SDCard_raw_19057_20250510.CSV`) plus die drei zugehörigen
+Influx-Referenzen für Device 19057 (Node Hintergräppelen, Auslesedatum
+2025-05-10). `Output/` enthält die dazu passende Referenz-Baseline eines
+Standard-Laufs (Offline-Modus, ohne `--split-by-year`).
+
+Beides ist über `.gitignore` als feste Whitelist geregelt — lokale Läufe
+mit eigenen SD-/Influx-Dateien oder mit `--split-by-year` erzeugen
+zusätzliche Dateien in `Input/`/`Output/`, die lokal bleiben und nicht
+committet werden.
+
 ### Abhängigkeiten
 
 - Python **3.10+** (getestet mit 3.11)
