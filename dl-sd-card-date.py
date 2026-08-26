@@ -223,7 +223,7 @@ def _apply_config(config_path: Optional[str]):
     }
     for name, cast in FLAT_KEYS.items():
         # Erlaube sowohl UPPER als auch lower-case Keys in YAML
-        val = data.get(name) or data.get(name.lower())
+        val = data.get(name, data.get(name.lower()))
         if val is not None:
             try:
                 globals()[name] = cast(val)
@@ -231,7 +231,7 @@ def _apply_config(config_path: Optional[str]):
                 pass
 
     # Spalten-Definition (Liste von Dicts)
-    cols_raw = data.get("columns") or data.get("COLUMNS")
+    cols_raw = data.get("columns", data.get("COLUMNS"))
     if cols_raw and isinstance(cols_raw, list):
         parsed = []
         for c in cols_raw:
