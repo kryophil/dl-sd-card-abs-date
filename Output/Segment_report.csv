@@ -1,0 +1,6 @@
+segment_id,n_points,n_grid_points,rmse_to_mid_s_median,jitter_median_s_overall,jitter_p95_s_overall,drift_ppm_median,quality_flag,notes
+0,2,0,,,,,no_abs_time,no_anchors
+1,116685,0,,,,,no_abs_time,no_anchors
+2,266581,1420,2.6000802030154735,4.0,8.0,-13.967144284009695,good,anchors:221171
+3,13,0,,,,,no_abs_time,no_anchors
+4,128090,692,2.57935914534576,4.0,8.0,-4.355289183243351,good,anchors:106349
