@@ -1015,7 +1015,7 @@ def run_multifile(multi_dir: Path, out_dir: Path, influx_dir: Optional[str],
                     tzinfo=timezone.utc)
             if readout is None:
                 print(f"[WARN] Kein Auslesedatum aus '{f.name}' ableitbar und kein "
-                      f"READOUT_DATE gesetzt → Datei ohne absolute Zeit.",
+                      f"READOUT_DATE gesetzt -> Datei ohne absolute Zeit.",
                       file=sys.stderr)
                 influx_df = pd.DataFrame()
             else:
