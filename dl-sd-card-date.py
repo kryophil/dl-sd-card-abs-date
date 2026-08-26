@@ -65,6 +65,7 @@ DEVICE_ID    = ""     # z.B. "19057"
 DATABASE     = "main"
 READOUT_DATE = ""     # ISO-Datum, z.B. "2025-05-10"
 TIME_MARGIN_DAYS = 1.0  # Sicherheitsreserve für API-Zeitfenster
+API_TIMEOUT_S = 30.0    # Timeout (s) für einzelne API-Requests
 
 # --- Jitter ---
 J_MAX_SECONDS = 8.0
@@ -219,7 +220,7 @@ def _apply_config(config_path: Optional[str]):
         "OUT_SD_ABSOLUTE": str, "OUT_SEGMENT_REPORT": str,
         "OUT_ANCHOR_REPORT": str, "OUT_PLAUSIBILITY_REPORT": str,
         "API_DOMAIN": str, "API_KEY": str, "DEVICE_ID": str, "DATABASE": str,
-        "READOUT_DATE": str, "TIME_MARGIN_DAYS": float,
+        "READOUT_DATE": str, "TIME_MARGIN_DAYS": float, "API_TIMEOUT_S": float,
     }
     for name, cast in FLAT_KEYS.items():
         # Erlaube sowohl UPPER als auch lower-case Keys in YAML
@@ -513,6 +514,7 @@ def query_api_for_segments(sd_df: pd.DataFrame, readout_date: datetime
                 convert_timestamp=True,
                 timezone="UTC",
                 database=DATABASE,
+                timeout=API_TIMEOUT_S,
             )
         except ValueError as e:
             print(f"[WARN] API-Abfrage für Segment {seg_id} lieferte keine Daten: {e}")

@@ -36,7 +36,8 @@ def query(domain, api_key, time_filter='',
           convert_timestamp=True,
           timezone='UTC',
           with_location=False,
-          database='main'):
+          database='main',
+          timeout=30.0):
 
     select_var = 'value'
     fill = ''
@@ -80,7 +81,8 @@ def query(domain, api_key, time_filter='',
                      params={'db': 'main',
                              'epoch': 'ms',
                              'q': q},
-                     headers={'Authorization': 'Bearer {}'.format(api_key)})
+                     headers={'Authorization': 'Bearer {}'.format(api_key)},
+                     timeout=timeout)
 
     if not r.ok:
         raise ValueError("API-Fehler {}: {}".format(r.status_code, r.text))
